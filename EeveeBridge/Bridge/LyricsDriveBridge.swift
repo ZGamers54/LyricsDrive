@@ -1,7 +1,21 @@
+import ActivityKit
 import Foundation
 import MediaPlayer
 import Network
 import WidgetKit
+
+struct LyricsActivityAttributes: ActivityAttributes {
+    struct ContentState: Codable, Hashable {
+        let title: String
+        let artist: String
+        let currentLine: String
+        let nextLine: String
+        let progress: Double
+        let isPlaying: Bool
+    }
+
+    let trackID: String
+}
 
 private struct BridgeLyricLine: Codable, Hashable {
     let time: TimeInterval
@@ -19,6 +33,31 @@ private struct BridgeSnapshot: Codable, Hashable {
     let isPlaying: Bool
     let lines: [BridgeLyricLine]
     let status: String
+
+    func linePair(at position: TimeInterval) -> (String, String) {
+        guard !lines.isEmpty else { return (status, "") }
+
+        var low = 0
+        var high = lines.count - 1
+        var answer: Int?
+        while low <= high {
+            let mid = (low + high) / 2
+            if lines[mid].time <= position {
+                answer = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+
+        guard let index = answer else {
+            return ("♪", lines.first?.text ?? "")
+        }
+
+        let current = lines[index].text
+        let next = index + 1 < lines.count ? lines[index + 1].text : ""
+        return (current, next)
+    }
 }
 
 private struct LRCLIBResponse: Decodable {
@@ -26,6 +65,77 @@ private struct LRCLIBResponse: Decodable {
     let artistName: String?
     let duration: Double?
     let syncedLyrics: String?
+}
+
+actor LyricsLiveActivityController {
+    private var activity: Activity<LyricsActivityAttributes>?
+    private var fingerprint = ""
+
+    func start(snapshot: BridgeSnapshot) async {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+
+        if let activity {
+            await activity.end(nil, dismissalPolicy: .immediate)
+            self.activity = nil
+        }
+
+        let pair = snapshot.linePair(at: snapshot.progressAtAnchor)
+        let state = LyricsActivityAttributes.ContentState(
+            title: snapshot.title,
+            artist: snapshot.artist,
+            currentLine: pair.0,
+            nextLine: pair.1,
+            progress: snapshot.duration > 0 ? snapshot.progressAtAnchor / snapshot.duration : 0,
+            isPlaying: snapshot.isPlaying
+        )
+
+        do {
+            activity = try Activity.request(
+                attributes: LyricsActivityAttributes(trackID: snapshot.trackID),
+                content: ActivityContent(state: state, staleDate: Date().addingTimeInterval(15)),
+                pushType: nil
+            )
+            fingerprint = ""
+        } catch {
+            activity = nil
+        }
+    }
+
+    func update(snapshot: BridgeSnapshot, position: TimeInterval) async {
+        guard let activity else { return }
+
+        let pair = snapshot.linePair(at: position)
+        let progress = snapshot.duration > 0 ? min(max(position / snapshot.duration, 0), 1) : 0
+        let bucket = Int(progress * 100)
+        let nextFingerprint = "\(snapshot.trackID)|\(pair.0)|\(pair.1)|\(snapshot.isPlaying)|\(bucket)"
+
+        guard nextFingerprint != fingerprint else { return }
+        fingerprint = nextFingerprint
+
+        let state = LyricsActivityAttributes.ContentState(
+            title: snapshot.title,
+            artist: snapshot.artist,
+            currentLine: pair.0,
+            nextLine: pair.1,
+            progress: progress,
+            isPlaying: snapshot.isPlaying
+        )
+
+        await activity.update(
+            ActivityContent(
+                state: state,
+                staleDate: Date().addingTimeInterval(15)
+            )
+        )
+    }
+
+    func stop() async {
+        if let activity {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
+        activity = nil
+        fingerprint = ""
+    }
 }
 
 @_cdecl("zxPluginsInjectGenericEntry")
@@ -42,14 +152,13 @@ final class LyricsDriveBridge {
     static let shared = LyricsDriveBridge()
 
     private let stateQueue = DispatchQueue(label: "lyricsdrive.bridge.state")
+    private let liveActivity = LyricsLiveActivityController()
     private var timer: DispatchSourceTimer?
     private var server: NWListener?
     private var snapshot: BridgeSnapshot?
     private var lastRawTrackID: String?
     private var lyricsGeneration = UUID()
     private var lastTransportState: Bool?
-    private var lastAnchorProgress: TimeInterval = 0
-    private var lastAnchorDate = Date.distantPast
     private var started = false
 
     private init() {}
@@ -65,7 +174,7 @@ final class LyricsDriveBridge {
 
     private func startPolling() {
         let timer = DispatchSource.makeTimerSource(queue: stateQueue)
-        timer.schedule(deadline: .now() + 0.5, repeating: 0.75, leeway: .milliseconds(120))
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.50, leeway: .milliseconds(80))
         timer.setEventHandler { [weak self] in
             self?.pollNowPlaying()
         }
@@ -84,7 +193,7 @@ final class LyricsDriveBridge {
 
     private func consume(nowPlayingInfo info: [String: Any]) {
         guard let title = info[MPMediaItemPropertyTitle] as? String, !title.isEmpty else {
-            updateEmptyState("En attente d’une lecture Spotify…")
+            updateEmptyState()
             return
         }
 
@@ -103,13 +212,11 @@ final class LyricsDriveBridge {
         if trackID != lastRawTrackID {
             lastRawTrackID = trackID
             lastTransportState = isPlaying
-            lastAnchorProgress = elapsed
-            lastAnchorDate = Date()
 
             let generation = UUID()
             lyricsGeneration = generation
 
-            snapshot = BridgeSnapshot(
+            let fresh = BridgeSnapshot(
                 trackID: trackID,
                 title: title,
                 artist: artist,
@@ -121,7 +228,14 @@ final class LyricsDriveBridge {
                 lines: [],
                 status: "Recherche des paroles…"
             )
+            snapshot = fresh
             reloadWidget()
+
+            Task {
+                await liveActivity.start(snapshot: fresh)
+                await liveActivity.update(snapshot: fresh, position: elapsed)
+            }
+
             fetchLyrics(title: title, artist: artist, duration: duration, trackID: trackID, generation: generation)
             return
         }
@@ -153,17 +267,22 @@ final class LyricsDriveBridge {
             )
             snapshot = current
             lastTransportState = isPlaying
-            lastAnchorProgress = elapsed
-            lastAnchorDate = Date()
             reloadWidget()
+        }
+
+        if let latest = snapshot {
+            Task {
+                await liveActivity.update(snapshot: latest, position: elapsed)
+            }
         }
     }
 
-    private func updateEmptyState(_ message: String) {
+    private func updateEmptyState() {
         guard snapshot != nil else { return }
         snapshot = nil
         lastRawTrackID = nil
         reloadWidget()
+        Task { await liveActivity.stop() }
     }
 
     private func fetchLyrics(
@@ -186,7 +305,7 @@ final class LyricsDriveBridge {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        request.setValue("LyricsDrive-EeveeBridge/0.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("LyricsDrive-EeveeBridge/0.2", forHTTPHeaderField: "User-Agent")
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             self.stateQueue.async {
@@ -213,7 +332,8 @@ final class LyricsDriveBridge {
 
     private func applyLyrics(_ lines: [BridgeLyricLine], status: String, generation: UUID) {
         guard generation == lyricsGeneration, let current = snapshot else { return }
-        snapshot = BridgeSnapshot(
+
+        let updated = BridgeSnapshot(
             trackID: current.trackID,
             title: current.title,
             artist: current.artist,
@@ -225,7 +345,12 @@ final class LyricsDriveBridge {
             lines: lines,
             status: status
         )
+        snapshot = updated
         reloadWidget()
+
+        Task {
+            await liveActivity.update(snapshot: updated, position: updated.progressAtAnchor)
+        }
     }
 
     private func reloadWidget() {
@@ -242,7 +367,6 @@ final class LyricsDriveBridge {
             listener.newConnectionHandler = { [weak self] connection in
                 self?.serve(connection)
             }
-            listener.stateUpdateHandler = { _ in }
             listener.start(queue: stateQueue)
             server = listener
         } catch {
