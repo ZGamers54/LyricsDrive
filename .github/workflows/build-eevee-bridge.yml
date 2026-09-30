@@ -1,0 +1,71 @@
+name: Build Eevee Lyrics Bridge
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'EeveeBridge/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        working-directory: EeveeBridge
+        run: xcodegen generate
+
+      - name: Build bridge and widget
+        working-directory: EeveeBridge
+        run: |
+          set -o pipefail
+          xcodebuild             -project EeveeLyricsBridge.xcodeproj             -scheme EeveeLyricsBridge             -configuration Release             -sdk iphoneos             -derivedDataPath build             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             clean build | tee xcodebuild.log
+
+      - name: Collect patch payload
+        working-directory: EeveeBridge
+        run: |
+          set -eux
+          mkdir -p artifact
+          BRIDGE="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -type f -name 'zxPluginsInject.dylib' -print -quit)"
+          if [ -z "$BRIDGE" ]; then
+            BRIDGE="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -type f -name 'libzxPluginsInject.dylib' -print -quit)"
+          fi
+          test -n "$BRIDGE"
+          cp "$BRIDGE" artifact/zxPluginsInject.dylib
+
+          WIDGET="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -type d -name 'WidgetExtension.appex' -print -quit)"
+          test -n "$WIDGET"
+          cp -R "$WIDGET" artifact/WidgetExtension.appex
+
+          file artifact/zxPluginsInject.dylib
+          plutil -p artifact/WidgetExtension.appex/Info.plist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EeveeLyricsBridge-patch
+          path: EeveeBridge/artifact
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: EeveeLyricsBridge-xcodebuild-log
+          path: EeveeBridge/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
