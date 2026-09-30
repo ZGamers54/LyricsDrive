@@ -111,12 +111,24 @@ private struct Provider: TimelineProvider {
                     }
                     if entries.count >= 220 { break }
                 }
+
+                // Keep the precomputed timeline alive until the end of the track.
+                // This avoids asking the host app for a fresh timeline ~45 s later,
+                // which is exactly when iOS may have suspended the host after locking.
+                if snapshot.duration > 0 {
+                    let endDelta = snapshot.duration - snapshot.progressAtAnchor
+                    let endDate = snapshot.anchorDate.addingTimeInterval(max(0, endDelta))
+                    if endDate > (entries.last?.date ?? now).addingTimeInterval(1) {
+                        entries.append(Entry(date: endDate, snapshot: snapshot))
+                    }
+                }
             }
 
+            let policy: TimelineReloadPolicy = snapshot.isPlaying ? .atEnd : .never
             BridgeClient.acknowledge(
-                "Timeline fournie : \(entries.count) entrées, \(snapshot.lines.count) lignes, lecture=\(snapshot.isPlaying), avance=\(LyricsTiming.displayLead)s"
+                "Timeline complète : \(entries.count) entrées, \(snapshot.lines.count) lignes, lecture=\(snapshot.isPlaying), policy=\(snapshot.isPlaying ? "atEnd" : "never"), avance=\(LyricsTiming.displayLead)s"
             )
-            completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(45))))
+            completion(Timeline(entries: entries, policy: policy))
         }
     }
 }
