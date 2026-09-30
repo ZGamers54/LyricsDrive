@@ -10,30 +10,12 @@ settings:
     DEVELOPMENT_TEAM: ""
 
 targets:
-  zxPluginsInject:
-    type: dynamicLibrary
-    platform: iOS
-    deploymentTarget: "17.0"
-    sources:
-      - path: EeveeBridge/Bridge
-    settings:
-      base:
-        PRODUCT_NAME: zxPluginsInject
-        EXECUTABLE_PREFIX: ""
-        PRODUCT_BUNDLE_IDENTIFIER: com.zgamers54.eeveelyrics.bridge
-        GENERATE_INFOPLIST_FILE: YES
-        SKIP_INSTALL: YES
-        CODE_SIGNING_ALLOWED: NO
-        MACH_O_TYPE: mh_dylib
-        DYLIB_INSTALL_NAME_BASE: "@rpath"
-        OTHER_LDFLAGS: "$(inherited) -framework Foundation -framework MediaPlayer -framework WidgetKit -framework Network"
-
   LyricsDriveWidgetExtension:
     type: app-extension
     platform: iOS
     deploymentTarget: "17.0"
     sources:
-      - path: EeveeBridge/Widget
+      - path: Widget
     settings:
       base:
         PRODUCT_NAME: WidgetExtension
@@ -43,7 +25,7 @@ targets:
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGNING_ALLOWED: NO
     info:
-      path: EeveeBridge/Widget/Info.plist
+      path: Widget/Info.plist
       properties:
         CFBundleDisplayName: LyricsDrive
         CFBundleExecutable: "$(EXECUTABLE_NAME)"
@@ -58,10 +40,9 @@ targets:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
 
 schemes:
-  EeveeLyricsBridge:
+  EeveeLyricsWidget:
     build:
       targets:
-        zxPluginsInject: all
         LyricsDriveWidgetExtension: all
     archive:
       config: Release
