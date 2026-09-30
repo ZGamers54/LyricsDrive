@@ -142,7 +142,9 @@ private struct LyricsView: View {
     var body: some View {
         if let snapshot = entry.snapshot {
             let index = snapshot.lineIndex(at: entry.date)
-            let current = index.map { snapshot.lines[$0].text } ?? snapshot.status
+            let current = index.map { snapshot.lines[$0].text }
+                ?? snapshot.lines.first?.text
+                ?? snapshot.status
             let next = index.flatMap { $0 + 1 < snapshot.lines.count ? snapshot.lines[$0 + 1].text : nil }
 
             VStack(alignment: .leading, spacing: 6) {
