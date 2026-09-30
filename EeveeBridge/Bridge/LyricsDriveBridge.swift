@@ -70,6 +70,20 @@ private struct EeveeLyricsPayload {
     let lines: [BridgeLyricLine]
 }
 
+private struct EeveeLyricsJSONPayload: Decodable {
+    struct Line: Decodable {
+        let text: String
+        let offsetMs: Int
+    }
+
+    let trackId: String
+    let title: String
+    let artist: String
+    let source: String
+    let timeSynced: Bool
+    let lines: [Line]
+}
+
 private actor LyricsLiveActivityController {
     private var activity: Activity<LyricsActivityAttributes>?
     private var fingerprint = ""
@@ -160,6 +174,18 @@ public func zxPluginsInjectGenericEntry() {
 @_cdecl("LyricsDriveBridgeStart")
 public func LyricsDriveBridgeStart() {
     LyricsDriveBridge.shared.start()
+}
+
+@_cdecl("LyricsDriveBridgePublishLyricsJSON")
+public func LyricsDriveBridgePublishLyricsJSON(_ jsonCString: UnsafePointer<CChar>?) {
+    guard let jsonCString else { return }
+    let json = String(cString: jsonCString)
+    guard let data = json.data(using: .utf8),
+          let decoded = try? JSONDecoder().decode(EeveeLyricsJSONPayload.self, from: data) else {
+        return
+    }
+
+    LyricsDriveBridge.shared.acceptEeveeLyricsJSON(decoded)
 }
 
 final class LyricsDriveBridge {
@@ -364,6 +390,24 @@ final class LyricsDriveBridge {
         Task { await liveActivity.stop() }
     }
 
+    fileprivate func acceptEeveeLyricsJSON(_ decoded: EeveeLyricsJSONPayload) {
+        let payload = EeveeLyricsPayload(
+            trackID: decoded.trackId,
+            title: decoded.title,
+            artist: decoded.artist,
+            source: decoded.source,
+            timeSynced: decoded.timeSynced,
+            lines: decoded.lines
+                .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.offsetMs >= 0 }
+                .map { BridgeLyricLine(time: Double($0.offsetMs) / 1000.0, text: $0.text) }
+                .sorted { $0.time < $1.time }
+        )
+
+        stateQueue.async {
+            self.applyEeveeLyricsPayload(payload)
+        }
+    }
+
     private func installEeveeLyricsObserver() {
         eeveeLyricsObserver = NotificationCenter.default.addObserver(
             forName: Notification.Name("LyricsDrive.EeveeLyricsLoaded"),
@@ -416,6 +460,10 @@ final class LyricsDriveBridge {
             timeSynced: timeSynced,
             lines: lines
         )
+        applyEeveeLyricsPayload(payload)
+    }
+
+    private func applyEeveeLyricsPayload(_ payload: EeveeLyricsPayload) {
         pendingEeveeLyrics = payload
 
         guard let current = snapshot, matches(payload: payload, snapshot: current) else { return }
