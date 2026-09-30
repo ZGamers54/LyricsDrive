@@ -24,3 +24,11 @@ Le rapport distingue demande de rechargement, requête reçue du widget, timelin
 Corrections : lecture TCP jusqu'au délimiteur (paquets fragmentés), délai/erreur JSON explicites, écoute limitée à 127.0.0.1, durée inconnue qui ne bloque plus la position du widget à zéro. Les erreurs LRCLIB et ActivityKit sont exposées. L'algorithme d'horloge v0.3 est conservé pour observer les valeurs brutes et les recalages avant une refonte.
 
 Le workflow macOS compile le bridge et le widget, exécute des tests Swift du protocole (fragmentation, UTF-8, troncature, limite de taille) et livre les binaires avec SOURCE_COMMIT.txt. Les essais iPhone/CarPlay restent nécessaires.
+
+## v0.5 — horloge
+
+Le rapport reçu sur la v0.4 montrait une position brute à 7,53 s, inchangée depuis 64,7 s. Les 109 lignes étaient reçues mais l'horloge se recalait continuellement en arrière avant la première ligne (12,46 s).
+
+La nouvelle horloge utilise le temps monotone écoulé depuis son ancre. Une valeur brute identique ne déclenche plus de recalage, même après plusieurs relevés. Une nouvelle valeur, y compris zéro, est appliquée une seule fois. Une pause/reprise avec une valeur inchangée conserve la position locale.
+
+Tests Swift : répétition exacte du rapport, retours/avances, retour à zéro, pause/reprise avec ancre figée, valeurs manquantes/invalides, durée inconnue/fin de morceau, nouveau morceau. Après installation, démarrer une chanson depuis le début pour disposer d'une ancre fraîche. Le diagnostic v0.5 et le test local restent disponibles.

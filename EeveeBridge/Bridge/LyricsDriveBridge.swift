@@ -189,11 +189,7 @@ final class LyricsDriveBridge {
     private var snapshot: BridgeSnapshot?
     private var lastRawTrackID: String?
     private var lyricsGeneration = UUID()
-    private var lastTransportState: Bool?
-    private var clockPosition: TimeInterval = 0
-    private var clockAnchorDate = Date()
-    private var clockIsPlaying = false
-    private var backwardSeekCandidate: (raw: TimeInterval, count: Int)?
+    private var playbackClock = PlaybackClock()
     private var started = false
     private var changingMode = false
     private var demoStarted: Date?
@@ -207,7 +203,6 @@ final class LyricsDriveBridge {
     private var lastWidgetAck: Date?
     private var widgetDiagnostic = "Aucune timeline confirmée"
     private var reloadRequested: Date?
-    private var clockDiagnostic = "En attente"
     private var lastNowPlayingKeys = ""
 
 
@@ -262,7 +257,7 @@ final class LyricsDriveBridge {
         let artist = (info[MPMediaItemPropertyArtist] as? String) ?? ""
         let album = (info[MPMediaItemPropertyAlbumTitle] as? String) ?? ""
         let duration = numeric(info[MPMediaItemPropertyPlaybackDuration]) ?? 0
-        let elapsed = numeric(info[MPNowPlayingInfoPropertyElapsedPlaybackTime]) ?? 0
+        let elapsed = numeric(info[MPNowPlayingInfoPropertyElapsedPlaybackTime])
         let rate = numeric(info[MPNowPlayingInfoPropertyPlaybackRate]) ?? 0
         let isPlaying = rate > 0.001
 
@@ -273,12 +268,9 @@ final class LyricsDriveBridge {
 
         if trackID != lastRawTrackID {
             lastRawTrackID = trackID
-            lastTransportState = isPlaying
-            clockPosition = max(0, elapsed)
-            clockAnchorDate = Date()
-            clockIsPlaying = isPlaying
-            backwardSeekCandidate = nil
-            clockDiagnostic = "Ancrage nouveau morceau"
+            playbackClock.reset(elapsed: elapsed, isPlaying: isPlaying, now: ProcessInfo.processInfo.systemUptime)
+            let now = Date()
+            let position = playbackClock.position(at: ProcessInfo.processInfo.systemUptime, duration: duration)
 
             let generation = UUID()
             lyricsGeneration = generation
@@ -289,8 +281,8 @@ final class LyricsDriveBridge {
                 artist: artist,
                 album: album,
                 duration: duration,
-                progressAtAnchor: clockPosition,
-                anchorDate: clockAnchorDate,
+                progressAtAnchor: position,
+                anchorDate: now,
                 isPlaying: isPlaying,
                 lines: [],
                 status: "Recherche des paroles…"
@@ -311,77 +303,24 @@ final class LyricsDriveBridge {
         guard var current = snapshot else { return }
 
         let now = Date()
-        var estimated = clockPosition + (clockIsPlaying ? max(0, now.timeIntervalSince(clockAnchorDate)) : 0)
-        estimated = min(max(estimated, 0), duration > 0 ? duration : estimated)
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let reanchored = playbackClock.consume(elapsed: elapsed, isPlaying: isPlaying, now: uptime, duration: duration)
+        let estimated = playbackClock.position(at: uptime, duration: duration)
 
-        let transportChanged = clockIsPlaying != isPlaying
-        var reanchored = false
-
-        if transportChanged {
-            // MPNowPlayingInfoCenter occasionally reports 0/stale elapsed time during transitions.
-            // Prefer the local monotonic clock unless the raw value is clearly plausible.
-            let candidate = (elapsed > 0.5 || estimated < 2.0) && abs(elapsed - estimated) < 8.0
-                ? elapsed
-                : estimated
-            clockPosition = max(0, candidate)
-            clockAnchorDate = now
-            clockIsPlaying = isPlaying
-            backwardSeekCandidate = nil
-            estimated = clockPosition
-            reanchored = true
-            clockDiagnostic = "Transition lecture / pause"
-        } else {
-            let delta = elapsed - estimated
-
-            if elapsed <= 0.5 && estimated > 3.0 {
-                // Ignore the common transient 0-second sample.
-                clockDiagnostic = "Position brute zéro ignorée"
-                backwardSeekCandidate = nil
-            } else if delta > 3.0 {
-                // Forward seeks are safe to accept immediately.
-                clockDiagnostic = "Recalage vers l’avant"
-                clockPosition = elapsed
-                clockAnchorDate = now
-                estimated = elapsed
-                backwardSeekCandidate = nil
-                reanchored = true
-            } else if delta < -3.0 {
-                // A real backward seek produces several coherent low samples; a stale sample usually does not.
-                if let candidate = backwardSeekCandidate,
-                   abs(elapsed - candidate.raw) < 2.0 {
-                    let nextCount = candidate.count + 1
-                    backwardSeekCandidate = (elapsed, nextCount)
-                    if nextCount >= 3 {
-                        clockDiagnostic = "Recalage arrière (3 échantillons ; vérifier si valeur figée)"
-                        clockPosition = elapsed
-                        clockAnchorDate = now
-                        estimated = elapsed
-                        backwardSeekCandidate = nil
-                        reanchored = true
-                    }
-                } else {
-                    backwardSeekCandidate = (elapsed, 1)
-                }
-            } else {
-                backwardSeekCandidate = nil
-            }
-        }
-
-        if reanchored || lastTransportState != isPlaying {
+        if reanchored {
             current = BridgeSnapshot(
                 trackID: current.trackID,
                 title: title,
                 artist: artist,
                 album: album,
                 duration: duration,
-                progressAtAnchor: clockPosition,
-                anchorDate: clockAnchorDate,
+                progressAtAnchor: estimated,
+                anchorDate: now,
                 isPlaying: isPlaying,
                 lines: current.lines,
                 status: current.lines.isEmpty ? current.status : "Paroles synchronisées"
             )
             snapshot = current
-            lastTransportState = isPlaying
             reloadWidget()
         }
 
@@ -399,10 +338,7 @@ final class LyricsDriveBridge {
         snapshot = nil
         lyricsGeneration = UUID()
         lastRawTrackID = nil
-        clockPosition = 0
-        clockAnchorDate = Date()
-        clockIsPlaying = false
-        backwardSeekCandidate = nil
+        playbackClock = PlaybackClock()
         reloadWidget()
         Task { await liveActivity.stop() }
     }
@@ -428,7 +364,7 @@ final class LyricsDriveBridge {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        request.setValue("LyricsDrive-EeveeBridge/0.4-diagnostics", forHTTPHeaderField: "User-Agent")
+        request.setValue("LyricsDrive-EeveeBridge/0.5-diagnostics", forHTTPHeaderField: "User-Agent")
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             self.stateQueue.async {
@@ -465,7 +401,7 @@ final class LyricsDriveBridge {
         guard generation == lyricsGeneration, let current = snapshot else { return }
 
         let now = Date()
-        let stablePosition = clockPosition + (clockIsPlaying ? max(0, now.timeIntervalSince(clockAnchorDate)) : 0)
+        let stablePosition = playbackClock.position(at: ProcessInfo.processInfo.systemUptime, duration: current.duration)
         let updated = BridgeSnapshot(
             trackID: current.trackID,
             title: current.title,
@@ -474,15 +410,13 @@ final class LyricsDriveBridge {
             duration: current.duration,
             progressAtAnchor: stablePosition,
             anchorDate: now,
-            isPlaying: clockIsPlaying,
+            isPlaying: playbackClock.isPlaying,
             lines: lines,
             status: status
         )
         snapshot = updated
         reloadWidget()
 
-        clockPosition = stablePosition
-        clockAnchorDate = now
 
         Task {
             let active = await MainActor.run { UIApplication.shared.applicationState == .active }
@@ -581,7 +515,7 @@ final class LyricsDriveBridge {
         guard let start = demoStarted else { return }
         let position = min(30, max(0, Date().timeIntervalSince(start)))
         let demo = BridgeSnapshot(
-            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.4 diagnostic",
+            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.5 diagnostic",
             album: "", duration: 30, progressAtAnchor: 0, anchorDate: start, isPlaying: true,
             lines: [
                 BridgeLyricLine(time: 0, text: "1/6 · Test démarré"),
@@ -611,7 +545,7 @@ final class LyricsDriveBridge {
                 $0.progressAtAnchor + ($0.isPlaying ? max(0, now.timeIntervalSince($0.anchorDate)) : 0)) } ?? 0
             let pair = current?.linePair(at: position)
             let report = """
-            LyricsDrive v0.4 · DIAGNOSTIC
+            LyricsDrive v0.5 · DIAGNOSTIC
             Date : \(ISO8601DateFormatter().string(from: now))
             Mode : \(self.demoStarted == nil ? "Spotify réel" : "TEST LOCAL (Revenir à Spotify pour arrêter)")
 
@@ -624,7 +558,7 @@ final class LyricsDriveBridge {
             Vitesse brute : \(self.rawRate.map { String($0) } ?? "clé absente (interprétée comme pause)")
             Position calculée : \(String(format: "%.2f s", position))
             Lecture : \(current?.isPlaying == true ? "oui" : "non")
-            Horloge : \(self.clockDiagnostic)
+            Horloge : \(self.playbackClock.diagnostic)
 
             PAROLES
             \(self.lyricsDiagnostic)

@@ -96,7 +96,7 @@ private final class DiagnosticsViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            self?.refresh()
+            Task { @MainActor in self?.refresh() }
         }
     }
 

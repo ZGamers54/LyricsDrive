@@ -45,6 +45,12 @@ jobs:
           swiftc Shared/BridgeFrame.swift Tests/BridgeFrameTests.swift -o /tmp/bridge-frame-tests
           /tmp/bridge-frame-tests
 
+      - name: Test playback clock regression
+        working-directory: EeveeBridge
+        run: |
+          swiftc Bridge/PlaybackClock.swift Tests/PlaybackClockTests.swift -o /tmp/playback-clock-tests
+          /tmp/playback-clock-tests
+
       - name: Generate widget project
         working-directory: EeveeBridge
         run: xcodegen generate
@@ -67,7 +73,7 @@ jobs:
           test -n "$WIDGET"
           cp -R "$WIDGET" artifact/WidgetExtension.appex
 
-          printf '%s\\n' "${{ github.event.pull_request.head.sha || github.sha }}" > artifact/SOURCE_COMMIT.txt
+          printf '%s\n' "${{ github.event.pull_request.head.sha || github.sha }}" > artifact/SOURCE_COMMIT.txt
           file artifact/zxPluginsInject.dylib
           plutil -p artifact/WidgetExtension.appex/Info.plist
 
