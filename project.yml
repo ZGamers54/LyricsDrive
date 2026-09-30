@@ -1,0 +1,58 @@
+name: LyricsDrive
+options:
+  bundleIdPrefix: com.zgamers54
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: 5.0
+    DEVELOPMENT_TEAM: ""
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+targets:
+  LyricsDrive:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: LyricsDrive
+      - path: Shared
+    dependencies:
+      - target: LyricsDriveWidgetExtension
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zgamers54.LyricsDrive
+        PRODUCT_NAME: LyricsDrive
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: LyricsDrive/LyricsDrive.entitlements
+    info:
+      path: LyricsDrive/Info.plist
+  LyricsDriveWidgetExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: LyricsDriveWidget
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zgamers54.LyricsDrive.Widget
+        PRODUCT_NAME: LyricsDriveWidgetExtension
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: LyricsDriveWidget/LyricsDriveWidget.entitlements
+    info:
+      path: LyricsDriveWidget/Info.plist
+schemes:
+  LyricsDrive:
+    build:
+      targets:
+        LyricsDrive: all
+        LyricsDriveWidgetExtension: all
+    run:
+      config: Debug
+    archive:
+      config: Release

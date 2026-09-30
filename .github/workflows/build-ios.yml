@@ -1,0 +1,97 @@
+name: Build LyricsDrive unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, lyricsdrive-v0.3]
+    paths:
+      - 'LyricsDrive/**'
+      - 'LyricsDriveWidget/**'
+      - 'Shared/**'
+      - 'project.yml'
+      - '.github/workflows/build-ios.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Validate property lists
+        run: |
+          plutil -lint LyricsDrive/Info.plist
+          plutil -lint LyricsDrive/LyricsDrive.entitlements
+          plutil -lint LyricsDriveWidget/Info.plist
+          plutil -lint LyricsDriveWidget/LyricsDriveWidget.entitlements
+
+      - name: Parse Swift sources
+        run: |
+          find LyricsDrive LyricsDriveWidget Shared -name '*.swift' -print0 | \
+            xargs -0 -n1 xcrun swiftc -parse
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build app and widget extension without signing
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project LyricsDrive.xcodeproj \
+            -scheme LyricsDrive \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build | tee xcodebuild.log
+
+      - name: Verify embedded widget extension
+        run: |
+          test -d build/Build/Products/Release-iphoneos/LyricsDrive.app
+          test -d build/Build/Products/Release-iphoneos/LyricsDrive.app/PlugIns/LyricsDriveWidgetExtension.appex
+
+      - name: Package unsigned IPA
+        run: |
+          rm -rf Payload LyricsDrive-unsigned.ipa
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/LyricsDrive.app Payload/
+          zip -qry LyricsDrive-unsigned.ipa Payload
+          ls -lh LyricsDrive-unsigned.ipa
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: LyricsDrive-v0.3-unsigned-ipa
+          path: LyricsDrive-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Xcode log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LyricsDrive-xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
