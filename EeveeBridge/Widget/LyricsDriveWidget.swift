@@ -1,6 +1,20 @@
+import ActivityKit
+import Network
 import SwiftUI
 import WidgetKit
-import Network
+
+struct LyricsActivityAttributes: ActivityAttributes {
+    struct ContentState: Codable, Hashable {
+        let title: String
+        let artist: String
+        let currentLine: String
+        let nextLine: String
+        let progress: Double
+        let isPlaying: Bool
+    }
+
+    let trackID: String
+}
 
 private struct LyricLine: Codable, Hashable {
     let time: TimeInterval
@@ -118,10 +132,7 @@ private enum BridgeClient {
         }
 
         connection.start(queue: queue)
-
-        queue.asyncAfter(deadline: .now() + 2.0) {
-            finish(nil)
-        }
+        queue.asyncAfter(deadline: .now() + 2.0) { finish(nil) }
     }
 }
 
@@ -141,14 +152,11 @@ private struct LyricsView: View {
                         .font(.caption.weight(.semibold))
                         .lineLimit(1)
                 }
-
                 Spacer(minLength: 0)
-
                 Text(current)
                     .font(.headline.weight(.bold))
                     .lineLimit(3)
                     .minimumScaleFactor(0.68)
-
                 if let next, !next.isEmpty {
                     Text(next)
                         .font(.caption2)
@@ -160,7 +168,6 @@ private struct LyricsView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-
                 ProgressView(value: snapshot.duration > 0 ? snapshot.position(at: entry.date) / snapshot.duration : 0)
                     .progressViewStyle(.linear)
             }
@@ -195,9 +202,83 @@ struct LyricsDriveCarPlayWidget: Widget {
     }
 }
 
+private struct LyricsActivityView: View {
+    @Environment(\.activityFamily) private var activityFamily
+    let context: ActivityViewContext<LyricsActivityAttributes>
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: activityFamily == .small ? 5 : 7) {
+            HStack(spacing: 5) {
+                Image(systemName: context.state.isPlaying ? "music.note" : "pause.fill")
+                Text(context.state.title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+            }
+
+            Text(context.state.currentLine)
+                .font(activityFamily == .small ? .headline.weight(.bold) : .title3.weight(.bold))
+                .lineLimit(activityFamily == .small ? 2 : 3)
+                .minimumScaleFactor(0.70)
+
+            if !context.state.nextLine.isEmpty {
+                Text(context.state.nextLine)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text(context.state.artist)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            ProgressView(value: context.state.progress)
+                .progressViewStyle(.linear)
+        }
+        .padding(activityFamily == .small ? 10 : 14)
+        .activityBackgroundTint(.black.opacity(0.88))
+        .activitySystemActionForegroundColor(.white)
+    }
+}
+
+struct LyricsDriveLiveActivity: Widget {
+    var body: some WidgetConfiguration {
+        ActivityConfiguration(for: LyricsActivityAttributes.self) { context in
+            LyricsActivityView(context: context)
+        } dynamicIsland: { context in
+            DynamicIsland {
+                DynamicIslandExpandedRegion(.center) {
+                    VStack(spacing: 3) {
+                        Text(context.state.currentLine)
+                            .font(.headline)
+                            .lineLimit(2)
+                        if !context.state.nextLine.isEmpty {
+                            Text(context.state.nextLine)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            } compactLeading: {
+                Image(systemName: "music.note")
+            } compactTrailing: {
+                Text(context.state.currentLine)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .frame(maxWidth: 72)
+            } minimal: {
+                Image(systemName: "music.note")
+            }
+        }
+        .supplementalActivityFamilies([.small])
+    }
+}
+
 @main
 struct LyricsDriveWidgetBundle: WidgetBundle {
     var body: some Widget {
         LyricsDriveCarPlayWidget()
+        LyricsDriveLiveActivity()
     }
 }
