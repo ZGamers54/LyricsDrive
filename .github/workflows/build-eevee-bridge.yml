@@ -34,7 +34,8 @@ jobs:
 
           xcrun --sdk iphoneos clang             -target arm64-apple-ios26.0             -isysroot "$SDK"             -fobjc-arc             -c Bridge/Bootstrap.m             -o build/bridge/Bootstrap.o
 
-          xcrun --sdk iphoneos swiftc             -target arm64-apple-ios26.0             -sdk "$SDK"             -parse-as-library             -emit-library             Bridge/LyricsDriveBridge.swift             build/bridge/Bootstrap.o             -o build/bridge/zxPluginsInject.dylib             -Xlinker -install_name             -Xlinker @rpath/zxPluginsInject.dylib             -framework Foundation             -framework MediaPlayer             -framework WidgetKit             -framework Network             -framework ActivityKit
+          xcrun --sdk iphoneos swiftc             -target arm64-apple-ios26.0             -sdk "$SDK"             -parse-as-library             -emit-library             Bridge/LyricsDriveBridge.swift             build/bridge/Bootstrap.o             -o build/bridge/zxPluginsInject.dylib             -Xlinker -install_name             -Xlinker @rpath/zxPluginsInject.dylib             -framework Foundation             -framework MediaPlayer             -framework WidgetKit             -framework Network             -framework ActivityKit \
+            -framework UIKit
 
           file build/bridge/zxPluginsInject.dylib
 
