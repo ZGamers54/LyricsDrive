@@ -137,8 +137,7 @@ private actor LyricsLiveActivityController {
 
         let pair = snapshot.linePair(at: position)
         let progress = snapshot.duration > 0 ? min(max(position / snapshot.duration, 0), 1) : 0
-        let bucket = Int(progress * 100)
-        let nextFingerprint = "\(snapshot.trackID)|\(pair.0)|\(pair.1)|\(snapshot.isPlaying)|\(bucket)"
+        let nextFingerprint = "\(snapshot.trackID)|\(pair.0)|\(pair.1)|\(snapshot.isPlaying)"
 
         guard nextFingerprint != fingerprint else { return }
         fingerprint = nextFingerprint
@@ -369,7 +368,7 @@ final class LyricsDriveBridge {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        request.setValue("LyricsDrive-EeveeBridge/0.6-carplay", forHTTPHeaderField: "User-Agent")
+        request.setValue("LyricsDrive-EeveeBridge/0.7-dashboard", forHTTPHeaderField: "User-Agent")
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             self.stateQueue.async {
@@ -520,7 +519,7 @@ final class LyricsDriveBridge {
         guard let start = demoStarted else { return }
         let position = min(30, max(0, Date().timeIntervalSince(start)))
         let demo = BridgeSnapshot(
-            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.6 diagnostic",
+            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.7 diagnostic",
             album: "", duration: 30, progressAtAnchor: 0, anchorDate: start, isPlaying: true,
             lines: [
                 BridgeLyricLine(time: 0, text: "1/6 · Test démarré"),
@@ -550,7 +549,7 @@ final class LyricsDriveBridge {
                 $0.progressAtAnchor + ($0.isPlaying ? max(0, now.timeIntervalSince($0.anchorDate)) : 0)) } ?? 0
             let pair = current?.linePair(at: position)
             let report = """
-            LyricsDrive v0.6 · DIAGNOSTIC
+            LyricsDrive v0.7 · DIAGNOSTIC
             Date : \(ISO8601DateFormatter().string(from: now))
             Mode : \(self.demoStarted == nil ? "Spotify réel" : "TEST LOCAL (Revenir à Spotify pour arrêter)")
 
@@ -571,6 +570,7 @@ final class LyricsDriveBridge {
             Phrase calculée : \(pair?.0 ?? "aucune")
             Phrase suivante : \(pair?.1 ?? "aucune")
             Avance affichage : \(String(format: "%.2f s", LyricsTiming.displayLead))
+            CarPlay Dashboard : Live Activity ActivityFamily.small
 
             WIDGET
             Serveur : \(self.serverDiagnostic)
