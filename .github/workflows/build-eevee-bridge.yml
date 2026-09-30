@@ -25,29 +25,37 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Generate project
+      - name: Build bridge dylib
+        working-directory: EeveeBridge
+        run: |
+          set -euxo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          mkdir -p build/bridge
+          xcrun --sdk iphoneos clang             -target arm64-apple-ios17.0             -isysroot "$SDK"             -fobjc-arc             -c Bridge/Bootstrap.m             -o build/bridge/Bootstrap.o
+
+          xcrun --sdk iphoneos swiftc             -target arm64-apple-ios17.0             -sdk "$SDK"             -parse-as-library             -emit-library             Bridge/LyricsDriveBridge.swift             build/bridge/Bootstrap.o             -o build/bridge/zxPluginsInject.dylib             -Xlinker -install_name             -Xlinker @rpath/zxPluginsInject.dylib             -framework Foundation             -framework MediaPlayer             -framework WidgetKit             -framework Network
+
+          file build/bridge/zxPluginsInject.dylib
+
+      - name: Generate widget project
         working-directory: EeveeBridge
         run: xcodegen generate
 
-      - name: Build bridge and widget
+      - name: Build widget extension
         working-directory: EeveeBridge
         run: |
           set -o pipefail
-          xcodebuild             -project EeveeLyricsBridge.xcodeproj             -scheme EeveeLyricsBridge             -configuration Release             -sdk iphoneos             -derivedDataPath build             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             clean build | tee xcodebuild.log
+          xcodebuild             -project EeveeLyricsBridge.xcodeproj             -scheme EeveeLyricsWidget             -configuration Release             -sdk iphoneos             -derivedDataPath build/widget             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             clean build | tee xcodebuild.log
 
       - name: Collect patch payload
         working-directory: EeveeBridge
         run: |
           set -eux
+          rm -rf artifact
           mkdir -p artifact
-          BRIDGE="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -type f -name 'zxPluginsInject.dylib' -print -quit)"
-          if [ -z "$BRIDGE" ]; then
-            BRIDGE="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -type f -name 'libzxPluginsInject.dylib' -print -quit)"
-          fi
-          test -n "$BRIDGE"
-          cp "$BRIDGE" artifact/zxPluginsInject.dylib
+          cp build/bridge/zxPluginsInject.dylib artifact/zxPluginsInject.dylib
 
-          WIDGET="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -type d -name 'WidgetExtension.appex' -print -quit)"
+          WIDGET="$(find build/widget/Build/Products/Release-iphoneos -maxdepth 1 -type d -name 'WidgetExtension.appex' -print -quit)"
           test -n "$WIDGET"
           cp -R "$WIDGET" artifact/WidgetExtension.appex
 
