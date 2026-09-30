@@ -2,9 +2,10 @@ import SwiftUI
 import WidgetKit
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
+
     @StateObject private var spotify = SpotifyClient()
     @StateObject private var liveActivity = LiveActivityManager()
-    @State private var clientID = ""
     @State private var message = "Prêt"
     @State private var currentTrack: SpotifyClient.PlaybackTrack?
     @State private var lyrics: LyricsTrack?
@@ -18,29 +19,31 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 Section("Spotify") {
-                    TextField("Spotify Client ID", text: $clientID)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Text("Redirect URI à enregistrer dans Spotify Developer Dashboard : lyricsdrive://callback")
+                    Label(
+                        spotify.isConnected ? "Spotify connecté" : (spotify.isAuthorized ? "Spotify autorisé" : "Spotify non connecté"),
+                        systemImage: spotify.isConnected ? "checkmark.circle.fill" : "music.note"
+                    )
+
+                    Text("Connexion locale via Spotify iOS SDK / App Remote. Aucune Spotify Web API n’est utilisée.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text("Redirect URI : lyricsdrive://callback")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                     if spotify.isAuthorized {
+                        Button("Reconnecter à Spotify") {
+                            spotify.reconnectIfPossible()
+                        }
+
                         Button("Déconnecter Spotify", role: .destructive) {
                             spotify.disconnect()
                             stopMonitoring()
                         }
                     } else {
                         Button("Connecter Spotify") {
-                            spotify.saveClientID(clientID)
-                            Task {
-                                do {
-                                    try await spotify.authorize()
-                                    message = "Spotify connecté."
-                                } catch {
-                                    message = error.localizedDescription
-                                }
-                            }
+                            spotify.authorize()
                         }
                     }
                 }
@@ -75,17 +78,33 @@ struct ContentView: View {
                 }
 
                 Section("État") {
-                    Text(message)
+                    Text(spotify.status)
+                    if message != spotify.status {
+                        Text(message)
+                    }
                 }
             }
             .navigationTitle("LyricsDrive")
-            .onAppear { clientID = spotify.savedClientID() }
+            .onOpenURL { url in
+                _ = spotify.handleRedirectURL(url)
+            }
+            .onChange(of: scenePhase) { _, phase in
+                switch phase {
+                case .active:
+                    spotify.reconnectIfPossible()
+                case .inactive, .background:
+                    spotify.disconnectForBackground()
+                @unknown default:
+                    break
+                }
+            }
         }
     }
 
     private func startMonitoring() {
         guard monitorTask == nil else { return }
-        message = "Surveillance Spotify…"
+        spotify.reconnectIfPossible()
+        message = "Surveillance Spotify locale…"
 
         monitorTask = Task {
             var lastTrackID: String?
@@ -101,7 +120,7 @@ struct ContentView: View {
 
             while !Task.isCancelled {
                 do {
-                    if Date().timeIntervalSince(lastSpotifyRefresh) >= 4 || anchor == nil {
+                    if Date().timeIntervalSince(lastSpotifyRefresh) >= 2 || anchor == nil {
                         if let playback = try await spotify.currentPlayback() {
                             currentTrack = playback
                             anchor = playback
@@ -178,7 +197,7 @@ struct ContentView: View {
                                 let drift = abs(expectedPosition - playback.progress)
                                 let transportChanged = widgetWasPlaying != playback.isPlaying
 
-                                if drift > 2.5 || transportChanged {
+                                if drift > 2.0 || transportChanged {
                                     publishWidget(
                                         playback: playback,
                                         lyrics: loadedLyrics,
@@ -189,7 +208,7 @@ struct ContentView: View {
                                     widgetWasPlaying = playback.isPlaying
                                 }
                             }
-                        } else {
+                        } else if spotify.isConnected {
                             currentTrack = nil
                             currentLine = "Aucune lecture Spotify"
                             nextLine = ""
@@ -221,8 +240,6 @@ struct ContentView: View {
                             nextLine = loadedLyrics?.lines.first?.text ?? ""
                         }
 
-                        // ActivityKit updates are intentionally throttled. A new state is sent
-                        // for lyric/transport changes, plus coarse 5% progress milestones.
                         let progressBucket = Int(progress * 20)
                         let fingerprint = "\(playback.id)|\(currentLine)|\(nextLine)|\(playback.isPlaying)|\(progressBucket)"
                         if fingerprint != lastActivityFingerprint {
