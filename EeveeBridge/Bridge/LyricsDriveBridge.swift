@@ -67,7 +67,7 @@ private struct LRCLIBResponse: Decodable {
     let syncedLyrics: String?
 }
 
-actor LyricsLiveActivityController {
+private actor LyricsLiveActivityController {
     private var activity: Activity<LyricsActivityAttributes>?
     private var fingerprint = ""
 
