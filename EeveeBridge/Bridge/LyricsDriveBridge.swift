@@ -72,11 +72,24 @@ private actor LyricsLiveActivityController {
     private var activity: Activity<LyricsActivityAttributes>?
     private var fingerprint = ""
     private var lastAttempt = Date.distantPast
+    private var diagnostic = "Pas encore démarrée"
+    private var lastSubmitted: Date?
+
+    func report() -> String {
+        diagnostic + (lastSubmitted.map { " · dernier envoi " + ISO8601DateFormatter().string(from: $0) } ?? "")
+    }
 
     func ensureStarted(snapshot: BridgeSnapshot, appIsActive: Bool) async {
-        guard appIsActive else { return }
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-        if activity != nil { return }
+        if let current = activity {
+            if current.activityState == .dismissed || current.activityState == .ended {
+                activity = nil
+                diagnostic = "Activité terminée par iOS ou l’utilisateur"
+            } else { return }
+        }
+        guard appIsActive else { diagnostic = "Démarrage en attente : ouvrir Spotify"; return }
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            diagnostic = "Activités en direct désactivées dans iOS"; return
+        }
         guard Date().timeIntervalSince(lastAttempt) >= 2 else { return }
         lastAttempt = Date()
 
@@ -97,7 +110,9 @@ private actor LyricsLiveActivityController {
                 pushType: nil
             )
             fingerprint = ""
+            diagnostic = "Créée (affichage à vérifier sur l’écran)"
         } catch {
+            diagnostic = "Échec création : \(error.localizedDescription)"
             activity = nil
         }
     }
@@ -138,6 +153,8 @@ private actor LyricsLiveActivityController {
                 staleDate: Date().addingTimeInterval(15)
             )
         )
+        lastSubmitted = Date()
+        diagnostic = "Mise à jour transmise à ActivityKit (rendu non confirmé)"
     }
 
     func stop() async {
@@ -147,6 +164,8 @@ private actor LyricsLiveActivityController {
         activity = nil
         fingerprint = ""
         lastAttempt = .distantPast
+        diagnostic = "Arrêtée"
+        lastSubmitted = nil
     }
 }
 
@@ -176,6 +195,21 @@ final class LyricsDriveBridge {
     private var clockIsPlaying = false
     private var backwardSeekCandidate: (raw: TimeInterval, count: Int)?
     private var started = false
+    private var changingMode = false
+    private var demoStarted: Date?
+    private var lastPoll: Date?
+    private var rawElapsed: Double?
+    private var rawRate: Double?
+    private var rawChangedAt: Date?
+    private var lyricsDiagnostic = "Pas de requête"
+    private var serverDiagnostic = "Pas encore démarré"
+    private var lastWidgetRequest: Date?
+    private var lastWidgetAck: Date?
+    private var widgetDiagnostic = "Aucune timeline confirmée"
+    private var reloadRequested: Date?
+    private var clockDiagnostic = "En attente"
+    private var lastNowPlayingKeys = ""
+
 
     private init() {}
 
@@ -185,6 +219,7 @@ final class LyricsDriveBridge {
             self.started = true
             self.startServer()
             self.startPolling()
+            DispatchQueue.main.async { BridgeDiagnosticsUI.shared.install() }
         }
     }
 
@@ -208,6 +243,17 @@ final class LyricsDriveBridge {
     }
 
     private func consume(nowPlayingInfo info: [String: Any]) {
+        lastPoll = Date()
+        guard !changingMode else { return }
+        if demoStarted != nil {
+            updateDemo()
+            return
+        }
+        let newRaw = numeric(info[MPNowPlayingInfoPropertyElapsedPlaybackTime])
+        if newRaw != rawElapsed { rawChangedAt = Date() }
+        rawElapsed = newRaw
+        rawRate = numeric(info[MPNowPlayingInfoPropertyPlaybackRate])
+        lastNowPlayingKeys = info.keys.sorted().joined(separator: ", ")
         guard let title = info[MPMediaItemPropertyTitle] as? String, !title.isEmpty else {
             updateEmptyState()
             return
@@ -232,6 +278,7 @@ final class LyricsDriveBridge {
             clockAnchorDate = Date()
             clockIsPlaying = isPlaying
             backwardSeekCandidate = nil
+            clockDiagnostic = "Ancrage nouveau morceau"
 
             let generation = UUID()
             lyricsGeneration = generation
@@ -254,7 +301,7 @@ final class LyricsDriveBridge {
             Task {
                 let active = await MainActor.run { UIApplication.shared.applicationState == .active }
                 await liveActivity.restart(snapshot: fresh, appIsActive: active)
-                await liveActivity.update(snapshot: fresh, position: clockPosition)
+                await liveActivity.update(snapshot: fresh, position: fresh.progressAtAnchor)
             }
 
             fetchLyrics(title: title, artist: artist, duration: duration, trackID: trackID, generation: generation)
@@ -282,14 +329,17 @@ final class LyricsDriveBridge {
             backwardSeekCandidate = nil
             estimated = clockPosition
             reanchored = true
+            clockDiagnostic = "Transition lecture / pause"
         } else {
             let delta = elapsed - estimated
 
             if elapsed <= 0.5 && estimated > 3.0 {
                 // Ignore the common transient 0-second sample.
+                clockDiagnostic = "Position brute zéro ignorée"
                 backwardSeekCandidate = nil
             } else if delta > 3.0 {
                 // Forward seeks are safe to accept immediately.
+                clockDiagnostic = "Recalage vers l’avant"
                 clockPosition = elapsed
                 clockAnchorDate = now
                 estimated = elapsed
@@ -302,6 +352,7 @@ final class LyricsDriveBridge {
                     let nextCount = candidate.count + 1
                     backwardSeekCandidate = (elapsed, nextCount)
                     if nextCount >= 3 {
+                        clockDiagnostic = "Recalage arrière (3 échantillons ; vérifier si valeur figée)"
                         clockPosition = elapsed
                         clockAnchorDate = now
                         estimated = elapsed
@@ -346,6 +397,7 @@ final class LyricsDriveBridge {
     private func updateEmptyState() {
         guard snapshot != nil else { return }
         snapshot = nil
+        lyricsGeneration = UUID()
         lastRawTrackID = nil
         clockPosition = 0
         clockAnchorDate = Date()
@@ -362,6 +414,7 @@ final class LyricsDriveBridge {
         trackID: String,
         generation: UUID
     ) {
+        lyricsDiagnostic = "Requête LRCLIB en cours"
         var components = URLComponents(string: "https://lrclib.net/api/get")!
         var query = [
             URLQueryItem(name: "track_name", value: title),
@@ -375,12 +428,15 @@ final class LyricsDriveBridge {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        request.setValue("LyricsDrive-EeveeBridge/0.3", forHTTPHeaderField: "User-Agent")
+        request.setValue("LyricsDrive-EeveeBridge/0.4-diagnostics", forHTTPHeaderField: "User-Agent")
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             self.stateQueue.async {
                 guard generation == self.lyricsGeneration, trackID == self.lastRawTrackID else { return }
 
+                let httpCode = (response as? HTTPURLResponse)?.statusCode
+                self.lyricsDiagnostic = error.map { "Réseau : " + $0.localizedDescription }
+                    ?? "HTTP \(httpCode.map(String.init) ?? "absent") · \(data?.count ?? 0) octets"
                 if let data,
                    let http = response as? HTTPURLResponse,
                    (200..<300).contains(http.statusCode),
@@ -389,12 +445,17 @@ final class LyricsDriveBridge {
                    !raw.isEmpty {
                     let lines = Self.parseLRC(raw)
                     if !lines.isEmpty {
+                        self.lyricsDiagnostic += " · \(lines.count) lignes · première \(lines.first!.time)s · dernière \(lines.last!.time)s"
                         self.applyLyrics(lines, status: "Paroles synchronisées", generation: generation)
                         return
                     }
                 }
 
-                let status = error == nil ? "Paroles synchronisées introuvables" : "LRCLIB indisponible"
+                let status: String
+                if error != nil { status = "LRCLIB : erreur réseau" }
+                else if httpCode == 404 { status = "Paroles introuvables" }
+                else if let code = httpCode, !(200..<300).contains(code) { status = "LRCLIB : HTTP \(code)" }
+                else { status = "Aucune parole synchronisée exploitable" }
                 self.applyLyrics([], status: status, generation: generation)
             }
         }.resume()
@@ -431,6 +492,7 @@ final class LyricsDriveBridge {
     }
 
     private func reloadWidget() {
+        reloadRequested = Date()
         DispatchQueue.main.async {
             WidgetCenter.shared.reloadTimelines(ofKind: "LyricsDriveCarPlay")
         }
@@ -440,36 +502,154 @@ final class LyricsDriveBridge {
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
-            let listener = try NWListener(using: parameters, on: 38475)
+            parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: 38475)
+            let listener = try NWListener(using: parameters)
+            listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready: self?.serverDiagnostic = "Prêt sur 127.0.0.1:38475"
+                case .failed(let error): self?.serverDiagnostic = "Échec : \(error.localizedDescription)"
+                case .waiting(let error): self?.serverDiagnostic = "En attente : \(error.localizedDescription)"
+                case .cancelled: self?.serverDiagnostic = "Arrêté"
+                default: break
+                }
+            }
             listener.newConnectionHandler = { [weak self] connection in
                 self?.serve(connection)
             }
             listener.start(queue: stateQueue)
             server = listener
         } catch {
+            serverDiagnostic = "Échec écoute : \(error.localizedDescription)"
             server = nil
         }
     }
 
     private func serve(_ connection: NWConnection) {
         connection.start(queue: stateQueue)
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 256) { [weak self] _, _, _, _ in
-            guard let self else {
-                connection.cancel()
-                return
+        var buffer = Data()
+        func receiveRequest() {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, complete, error in
+                guard let self else { connection.cancel(); return }
+                if let data { buffer.append(data) }
+                guard buffer.count <= 4096, error == nil else { connection.cancel(); return }
+                guard let newline = buffer.firstIndex(of: 10) else {
+                    if complete { connection.cancel() } else { receiveRequest() }
+                    return
+                }
+                let request = String(decoding: buffer[..<newline], as: UTF8.self)
+                let payload: Data
+                if request == "STATE" {
+                    self.lastWidgetRequest = Date()
+                    payload = self.snapshot.flatMap { try? JSONEncoder.bridge.encode($0) } ?? Data("{}".utf8)
+                } else if request.hasPrefix("ACK ") {
+                    self.lastWidgetAck = Date()
+                    self.widgetDiagnostic = String(request.dropFirst(4).prefix(200))
+                    payload = Data("OK".utf8)
+                } else {
+                    connection.cancel(); return
+                }
+                connection.send(content: payload + Data([10]), completion: .contentProcessed { _ in connection.cancel() })
             }
+        }
+        receiveRequest()
+        stateQueue.asyncAfter(deadline: .now() + 3) { connection.cancel() }
+    }
 
-            let payload: Data
-            if let snapshot = self.snapshot,
-               let encoded = try? JSONEncoder.bridge.encode(snapshot) {
-                payload = encoded
-            } else {
-                payload = Data("{}".utf8)
+    func setDemo(_ enabled: Bool) {
+        stateQueue.async {
+            guard !self.changingMode else { return }
+            self.changingMode = true
+            self.lyricsGeneration = UUID()
+            self.snapshot = nil
+            self.lastRawTrackID = nil
+            Task {
+                await self.liveActivity.stop()
+                self.stateQueue.async {
+                    self.demoStarted = enabled ? Date() : nil
+                    self.changingMode = false
+                    if enabled {
+                        self.lyricsDiagnostic = "Test local : aucune requête réseau"
+                        self.updateDemo()
+                    }
+                    self.reloadWidget()
+                }
             }
+        }
+    }
 
-            connection.send(content: payload, completion: .contentProcessed { _ in
-                connection.cancel()
-            })
+    private func updateDemo() {
+        guard let start = demoStarted else { return }
+        let position = min(30, max(0, Date().timeIntervalSince(start)))
+        let demo = BridgeSnapshot(
+            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.4 diagnostic",
+            album: "", duration: 30, progressAtAnchor: 0, anchorDate: start, isPlaying: true,
+            lines: [
+                BridgeLyricLine(time: 0, text: "1/6 · Test démarré"),
+                BridgeLyricLine(time: 5, text: "2/6 · Cinq secondes"),
+                BridgeLyricLine(time: 10, text: "3/6 · Dix secondes"),
+                BridgeLyricLine(time: 15, text: "4/6 · Quinze secondes"),
+                BridgeLyricLine(time: 20, text: "5/6 · Vingt secondes"),
+                BridgeLyricLine(time: 30, text: "6/6 · Test terminé")
+            ], status: "Test local"
+        )
+        snapshot = demo
+        Task {
+            let active = await MainActor.run { UIApplication.shared.applicationState == .active }
+            await liveActivity.ensureStarted(snapshot: demo, appIsActive: active)
+            await liveActivity.update(snapshot: demo, position: position)
+        }
+    }
+
+    func diagnosticReport(completion: @escaping (String) -> Void) {
+        stateQueue.async {
+            let now = Date()
+            func age(_ date: Date?) -> String {
+                date.map { String(format: "il y a %.1f s", max(0, now.timeIntervalSince($0))) } ?? "jamais"
+            }
+            let current = self.snapshot
+            let position = current.map { min($0.duration > 0 ? $0.duration : .greatestFiniteMagnitude,
+                $0.progressAtAnchor + ($0.isPlaying ? max(0, now.timeIntervalSince($0.anchorDate)) : 0)) } ?? 0
+            let pair = current?.linePair(at: position)
+            let report = """
+            LyricsDrive v0.4 · DIAGNOSTIC
+            Date : \(ISO8601DateFormatter().string(from: now))
+            Mode : \(self.demoStarted == nil ? "Spotify réel" : "TEST LOCAL (Revenir à Spotify pour arrêter)")
+
+            RÉCEPTION SPOTIFY
+            Dernier relevé : \(age(self.lastPoll))
+            Titre : \(current?.title ?? "absent")
+            Artiste : \(current?.artist ?? "absent")
+            Position brute : \(self.rawElapsed.map { String(format: "%.2f s", $0) } ?? "clé absente")
+            Valeur brute modifiée : \(age(self.rawChangedAt))
+            Vitesse brute : \(self.rawRate.map { String($0) } ?? "clé absente (interprétée comme pause)")
+            Position calculée : \(String(format: "%.2f s", position))
+            Lecture : \(current?.isPlaying == true ? "oui" : "non")
+            Horloge : \(self.clockDiagnostic)
+
+            PAROLES
+            \(self.lyricsDiagnostic)
+            Lignes : \(current?.lines.count ?? 0)
+            Phrase calculée : \(pair?.0 ?? "aucune")
+            Phrase suivante : \(pair?.1 ?? "aucune")
+
+            WIDGET
+            Serveur : \(self.serverDiagnostic)
+            Rechargement demandé : \(age(self.reloadRequested))
+            Requête reçue : \(age(self.lastWidgetRequest))
+            Accusé de réception : \(age(self.lastWidgetAck))
+            Résultat : \(self.widgetDiagnostic)
+            Une timeline fournie ne confirme pas son rendu par iOS.
+
+            CLÉS NOW PLAYING
+            \(self.lastNowPlayingKeys)
+            """
+            Task {
+                let activity = await self.liveActivity.report()
+                await MainActor.run {
+                    let active = UIApplication.shared.applicationState == .active
+                    completion(report + "\n\nACTIVITÉ EN DIRECT\n" + activity + "\nApp active : " + (active ? "oui" : "non"))
+                }
+            }
         }
     }
 

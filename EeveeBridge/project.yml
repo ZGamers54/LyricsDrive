@@ -16,6 +16,7 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: Widget
+      - path: Shared
     settings:
       base:
         PRODUCT_NAME: WidgetExtension

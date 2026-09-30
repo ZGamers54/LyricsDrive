@@ -35,7 +35,8 @@ private struct BridgeSnapshot: Codable, Hashable {
 
     func position(at date: Date) -> TimeInterval {
         let delta = isPlaying ? max(0, date.timeIntervalSince(anchorDate)) : 0
-        return min(duration, max(0, progressAtAnchor + delta))
+        let position = max(0, progressAtAnchor + delta)
+        return duration > 0 ? min(duration, position) : position
     }
 
     func lineIndex(at date: Date) -> Int? {
@@ -59,6 +60,7 @@ private struct BridgeSnapshot: Codable, Hashable {
 private struct Entry: TimelineEntry {
     let date: Date
     let snapshot: BridgeSnapshot?
+    var diagnostic: String? = nil
 }
 
 private struct Provider: TimelineProvider {
@@ -67,16 +69,16 @@ private struct Provider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (Entry) -> Void) {
-        BridgeClient.fetch { snapshot in
-            completion(Entry(date: .now, snapshot: snapshot))
+        BridgeClient.fetch { snapshot, error in
+            completion(Entry(date: .now, snapshot: snapshot, diagnostic: error))
         }
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<Entry>) -> Void) {
-        BridgeClient.fetch { snapshot in
+        BridgeClient.fetch { snapshot, error in
             let now = Date()
             guard let snapshot else {
-                completion(Timeline(entries: [Entry(date: now, snapshot: nil)], policy: .after(now.addingTimeInterval(20))))
+                completion(Timeline(entries: [Entry(date: now, snapshot: nil, diagnostic: error)], policy: .after(now.addingTimeInterval(20))))
                 return
             }
 
@@ -94,45 +96,72 @@ private struct Provider: TimelineProvider {
                 }
             }
 
+            BridgeClient.acknowledge("Timeline fournie : \(entries.count) entrées, \(snapshot.lines.count) lignes, lecture=\(snapshot.isPlaying)")
             completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(45))))
         }
     }
 }
 
 private enum BridgeClient {
-    static func fetch(completion: @escaping (BridgeSnapshot?) -> Void) {
+    static func acknowledge(_ message: String) {
+        let queue = DispatchQueue(label: "lyricsdrive.widget.ack")
+        let connection = NWConnection(host: "127.0.0.1", port: 38475, using: .tcp)
+        connection.stateUpdateHandler = { state in
+            if case .ready = state {
+                connection.send(content: Data(("ACK " + message + "\n").utf8), completion: .contentProcessed { _ in
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 32) { _, _, _, _ in connection.cancel() }
+                })
+            }
+        }
+        connection.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 2) { connection.cancel() }
+    }
+
+    static func fetch(completion: @escaping (BridgeSnapshot?, String?) -> Void) {
         let connection = NWConnection(host: "127.0.0.1", port: 38475, using: .tcp)
         let queue = DispatchQueue(label: "lyricsdrive.widget.bridge")
         var finished = false
+        var frame = BridgeFrame()
 
-        func finish(_ snapshot: BridgeSnapshot?) {
+        func finish(_ snapshot: BridgeSnapshot?, _ error: String? = nil) {
             guard !finished else { return }
             finished = true
             connection.cancel()
-            DispatchQueue.main.async { completion(snapshot) }
+            DispatchQueue.main.async { completion(snapshot, error) }
+        }
+
+        func receive() {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
+                guard !finished else { return }
+                if let error { finish(nil, "Réception : " + error.localizedDescription); return }
+                do {
+                    guard let payload = try frame.append(data, isComplete: complete) else { receive(); return }
+                    if payload == Data("{}".utf8) { finish(nil, "Bridge connecté · aucun morceau"); return }
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .millisecondsSince1970
+                    do { finish(try decoder.decode(BridgeSnapshot.self, from: payload)) }
+                    catch { acknowledge("Échec décodage JSON"); finish(nil, "Données du bridge illisibles") }
+                } catch {
+                    acknowledge("Réponse tronquée ou trop grande")
+                    finish(nil, "Réponse incomplète du bridge")
+                }
+            }
         }
 
         connection.stateUpdateHandler = { state in
             switch state {
             case .ready:
                 connection.send(content: Data("STATE\n".utf8), completion: .contentProcessed { error in
-                    if error != nil { finish(nil); return }
-                    connection.receive(minimumIncompleteLength: 1, maximumLength: 1_500_000) { data, _, _, _ in
-                        guard let data, !data.isEmpty else { finish(nil); return }
-                        let decoder = JSONDecoder()
-                        decoder.dateDecodingStrategy = .millisecondsSince1970
-                        finish(try? decoder.decode(BridgeSnapshot.self, from: data))
-                    }
+                    if error != nil { finish(nil, "Échec envoi au bridge"); return }
+                    receive()
                 })
-            case .failed, .cancelled:
-                finish(nil)
-            default:
-                break
+            case .failed(let error): finish(nil, "Connexion : " + error.localizedDescription)
+            case .cancelled: finish(nil, "Connexion fermée")
+            default: break
             }
         }
-
         connection.start(queue: queue)
-        queue.asyncAfter(deadline: .now() + 2.0) { finish(nil) }
+        queue.asyncAfter(deadline: .now() + 2) { finish(nil, "Bridge sans réponse (2 s)") }
     }
 }
 
@@ -182,7 +211,7 @@ private struct LyricsView: View {
                 Text("Lance EeveeSpotify")
                     .font(.headline)
                     .lineLimit(2)
-                Text("En attente du bridge")
+                Text(entry.diagnostic ?? "En attente du bridge")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

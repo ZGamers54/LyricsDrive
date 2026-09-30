@@ -1,0 +1,89 @@
+name: Build Eevee Lyrics Bridge
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'EeveeBridge/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build bridge dylib
+        working-directory: EeveeBridge
+        run: |
+          set -euxo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          mkdir -p build/bridge
+
+          xcrun --sdk iphoneos clang             -target arm64-apple-ios26.0             -isysroot "$SDK"             -fobjc-arc             -c Bridge/Bootstrap.m             -o build/bridge/Bootstrap.o
+
+          xcrun --sdk iphoneos swiftc             -target arm64-apple-ios26.0             -sdk "$SDK"             -parse-as-library             -emit-library             Bridge/*.swift             build/bridge/Bootstrap.o             -o build/bridge/zxPluginsInject.dylib             -Xlinker -install_name             -Xlinker @rpath/zxPluginsInject.dylib             -framework Foundation             -framework MediaPlayer             -framework WidgetKit             -framework Network             -framework ActivityKit \
+            -framework UIKit
+
+          file build/bridge/zxPluginsInject.dylib
+
+      - name: Test bridge framing
+        working-directory: EeveeBridge
+        run: |
+          swiftc Shared/BridgeFrame.swift Tests/BridgeFrameTests.swift -o /tmp/bridge-frame-tests
+          /tmp/bridge-frame-tests
+
+      - name: Generate widget project
+        working-directory: EeveeBridge
+        run: xcodegen generate
+
+      - name: Build widget extension
+        working-directory: EeveeBridge
+        run: |
+          set -o pipefail
+          xcodebuild             -project EeveeLyricsBridge.xcodeproj             -scheme EeveeLyricsWidget             -configuration Release             -sdk iphoneos             -derivedDataPath build/widget             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             clean build | tee xcodebuild.log
+
+      - name: Collect patch payload
+        working-directory: EeveeBridge
+        run: |
+          set -eux
+          rm -rf artifact
+          mkdir -p artifact
+          cp build/bridge/zxPluginsInject.dylib artifact/zxPluginsInject.dylib
+
+          WIDGET="$(find build/widget/Build/Products/Release-iphoneos -maxdepth 1 -type d -name 'WidgetExtension.appex' -print -quit)"
+          test -n "$WIDGET"
+          cp -R "$WIDGET" artifact/WidgetExtension.appex
+
+          printf '%s\\n' "${{ github.event.pull_request.head.sha || github.sha }}" > artifact/SOURCE_COMMIT.txt
+          file artifact/zxPluginsInject.dylib
+          plutil -p artifact/WidgetExtension.appex/Info.plist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EeveeLyricsBridge-patch
+          path: EeveeBridge/artifact
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: EeveeLyricsBridge-xcodebuild-log
+          path: EeveeBridge/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
+
