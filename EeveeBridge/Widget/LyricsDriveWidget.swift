@@ -1,5 +1,4 @@
 import ActivityKit
-import Compression
 import Network
 import SwiftUI
 import WidgetKit
@@ -9,111 +8,13 @@ private enum LyricsTiming {
 }
 
 struct LyricsActivityAttributes: ActivityAttributes {
-    struct ContentState: Codable, Hashable {
-        let title: String
-        let artist: String
-        let currentLine: String
-        let nextLine: String
-        let progress: Double
-        let isPlaying: Bool
-        let lyricSchedule: Data
-        let anchorDate: Date
-        let positionAtAnchor: Double
-        let duration: Double
-    }
-
+    typealias ContentState = LyricsLiveState
     let trackID: String
 }
 
 private struct LyricLine: Codable, Hashable {
     let time: TimeInterval
     let text: String
-}
-
-private struct LiveLyricCue: Hashable {
-    let time: TimeInterval
-    let text: String
-}
-
-private enum LiveLyricsScheduleCodec {
-    private static let compressedMagic = Data([0x4C, 0x44, 0x5A, 0x31]) // LDZ1
-    private static let rawMagic = Data([0x4C, 0x44, 0x52, 0x31])        // LDR1
-
-    static func decode(_ data: Data) -> [LiveLyricCue] {
-        guard data.count >= 8 else { return [] }
-
-        let magic = Data(data.prefix(4))
-        var rawSizeLE: UInt32 = 0
-        withUnsafeMutableBytes(of: &rawSizeLE) { buffer in
-            data.copyBytes(to: buffer, from: 4..<8)
-        }
-        let rawSize = Int(UInt32(littleEndian: rawSizeLE))
-        guard rawSize > 0, rawSize < 256_000 else { return [] }
-
-        let payload = Data(data.dropFirst(8))
-        let raw: Data
-
-        if magic == compressedMagic {
-            var decoded = Data(count: rawSize)
-            let count: Int = payload.withUnsafeBytes { srcBuffer in
-                decoded.withUnsafeMutableBytes { dstBuffer in
-                    guard let src = srcBuffer.bindMemory(to: UInt8.self).baseAddress,
-                          let dst = dstBuffer.bindMemory(to: UInt8.self).baseAddress else {
-                        return 0
-                    }
-
-                    return compression_decode_buffer(
-                        dst,
-                        rawSize,
-                        src,
-                        payload.count,
-                        nil,
-                        COMPRESSION_LZFSE
-                    )
-                }
-            }
-            guard count == rawSize else { return [] }
-            raw = decoded
-        } else if magic == rawMagic {
-            raw = payload
-        } else {
-            return []
-        }
-
-        var cues: [LiveLyricCue] = []
-        var offset = 0
-
-        while offset + 6 <= raw.count {
-            var millisLE: UInt32 = 0
-            var lengthLE: UInt16 = 0
-
-            withUnsafeMutableBytes(of: &millisLE) { buffer in
-                raw.copyBytes(to: buffer, from: offset..<(offset + 4))
-            }
-            offset += 4
-
-            withUnsafeMutableBytes(of: &lengthLE) { buffer in
-                raw.copyBytes(to: buffer, from: offset..<(offset + 2))
-            }
-            offset += 2
-
-            let length = Int(UInt16(littleEndian: lengthLE))
-            guard length >= 0, offset + length <= raw.count else { break }
-
-            let textData = raw.subdata(in: offset..<(offset + length))
-            offset += length
-
-            guard let text = String(data: textData, encoding: .utf8), !text.isEmpty else { continue }
-            cues.append(
-                LiveLyricCue(
-                    time: Double(UInt32(littleEndian: millisLE)) / 1000.0,
-                    text: text
-                )
-            )
-        }
-
-        return cues
-    }
 }
 
 private struct BridgeSnapshot: Codable, Hashable {
@@ -451,65 +352,16 @@ private struct LyricsActivityView: View {
     }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
-            let rendered = renderedState(at: timeline.date)
-
-            Group {
-                if activityFamily == .small {
-                    carPlayLayout(rendered)
-                } else {
-                    standardLayout(rendered)
-                }
-            }
-        }
-    }
-
-    private func renderedState(at date: Date) -> RenderedState {
-        let state = context.state
-        let elapsed = state.isPlaying ? max(0, date.timeIntervalSince(state.anchorDate)) : 0
-        let position = max(0, min(state.duration > 0 ? state.duration : .greatestFiniteMagnitude,
-                                  state.positionAtAnchor + elapsed))
-        let lyricPosition = position + LyricsTiming.displayLead
-        let cues = LiveLyricsScheduleCodec.decode(state.lyricSchedule)
-
-        guard !cues.isEmpty else {
-            return RenderedState(
-                currentLine: state.currentLine,
-                nextLine: state.nextLine,
-                progress: state.duration > 0 ? min(max(position / state.duration, 0), 1) : state.progress
-            )
-        }
-
-        var low = 0
-        var high = cues.count - 1
-        var answer: Int?
-
-        while low <= high {
-            let mid = (low + high) / 2
-            if cues[mid].time <= lyricPosition {
-                answer = mid
-                low = mid + 1
+        let rendered = RenderedState(currentLine: context.state.currentLine,
+                                     nextLine: context.state.nextLine,
+                                     progress: context.state.progress)
+        Group {
+            if activityFamily == .small {
+                carPlayLayout(rendered)
             } else {
-                high = mid - 1
+                standardLayout(rendered)
             }
         }
-
-        let current: String
-        let next: String
-
-        if let index = answer {
-            current = cues[index].text
-            next = index + 1 < cues.count ? cues[index + 1].text : ""
-        } else {
-            current = state.currentLine
-            next = cues.first?.text ?? state.nextLine
-        }
-
-        return RenderedState(
-            currentLine: current,
-            nextLine: next,
-            progress: state.duration > 0 ? min(max(position / state.duration, 0), 1) : state.progress
-        )
     }
 
     private func carPlayLayout(_ rendered: RenderedState) -> some View {
@@ -616,8 +468,16 @@ private struct LyricsActivityView: View {
                     .lineLimit(1)
             }
 
-            ProgressView(value: rendered.progress)
-                .progressViewStyle(.linear)
+            Group {
+                if context.state.isPlaying && context.state.duration > 0 {
+                    let start = context.state.anchorDate.addingTimeInterval(-context.state.positionAtAnchor)
+                    ProgressView(timerInterval: start...start.addingTimeInterval(context.state.duration),
+                                 countsDown: false)
+                } else {
+                    ProgressView(value: rendered.progress)
+                }
+            }
+            .progressViewStyle(.linear)
         }
         .padding(14)
         .activityBackgroundTint(.black.opacity(0.92))

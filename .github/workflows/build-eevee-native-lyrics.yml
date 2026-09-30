@@ -1,10 +1,6 @@
 name: Build Eevee Native Lyrics Bridge
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'EeveeBridge/**'
   workflow_dispatch:
 
 permissions:
