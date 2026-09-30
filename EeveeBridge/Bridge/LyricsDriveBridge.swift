@@ -181,7 +181,7 @@ private actor LyricsLiveActivityController {
             backgroundUpdates += 1
             lastBackgroundSubmission = lastSubmitted
         }
-        logger.debug("seq=\(submission.sequence) background=\(!appIsActive) update_ms=\(Int(lastUpdateDuration * 1000))")
+        logger.debug("seq=\(submission.sequence) background=\(!appIsActive) update_ms=\(Int(self.lastUpdateDuration * 1000))")
         diagnostic = "Phrase et ancre transmises à ActivityKit"
     }
 
