@@ -472,7 +472,11 @@ private struct LyricsActivityView: View {
                 if context.state.isPlaying && context.state.duration > 0 {
                     let start = context.state.anchorDate.addingTimeInterval(-context.state.positionAtAnchor)
                     ProgressView(timerInterval: start...start.addingTimeInterval(context.state.duration),
-                                 countsDown: false)
+                                 countsDown: false) {
+                        EmptyView()
+                    } currentValueLabel: {
+                        EmptyView()
+                    }
                 } else {
                     ProgressView(value: rendered.progress)
                 }
