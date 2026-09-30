@@ -61,11 +61,13 @@ private struct BridgeSnapshot: Codable, Hashable {
     }
 }
 
-private struct LRCLIBResponse: Decodable {
-    let trackName: String?
-    let artistName: String?
-    let duration: Double?
-    let syncedLyrics: String?
+private struct EeveeLyricsPayload {
+    let trackID: String
+    let title: String
+    let artist: String
+    let source: String
+    let timeSynced: Bool
+    let lines: [BridgeLyricLine]
 }
 
 private actor LyricsLiveActivityController {
@@ -169,7 +171,8 @@ final class LyricsDriveBridge {
     private var server: NWListener?
     private var snapshot: BridgeSnapshot?
     private var lastRawTrackID: String?
-    private var lyricsGeneration = UUID()
+    private var eeveeLyricsObserver: NSObjectProtocol?
+    private var pendingEeveeLyrics: EeveeLyricsPayload?
     private var lastTransportState: Bool?
     private var clockPosition: TimeInterval = 0
     private var clockAnchorDate = Date()
@@ -183,6 +186,7 @@ final class LyricsDriveBridge {
         stateQueue.async {
             guard !self.started else { return }
             self.started = true
+            self.installEeveeLyricsObserver()
             self.startServer()
             self.startPolling()
         }
@@ -233,8 +237,6 @@ final class LyricsDriveBridge {
             clockIsPlaying = isPlaying
             backwardSeekCandidate = nil
 
-            let generation = UUID()
-            lyricsGeneration = generation
 
             let fresh = BridgeSnapshot(
                 trackID: trackID,
@@ -246,18 +248,25 @@ final class LyricsDriveBridge {
                 anchorDate: clockAnchorDate,
                 isPlaying: isPlaying,
                 lines: [],
-                status: "Recherche des paroles…"
+                status: "En attente des paroles EeveeSpotify…"
             )
-            snapshot = fresh
+
+            let hydrated: BridgeSnapshot
+            if let payload = pendingEeveeLyrics, matches(payload: payload, snapshot: fresh) {
+                hydrated = snapshotByApplying(payload: payload, to: fresh)
+            } else {
+                hydrated = fresh
+            }
+
+            snapshot = hydrated
             reloadWidget()
 
             Task {
                 let active = await MainActor.run { UIApplication.shared.applicationState == .active }
-                await liveActivity.restart(snapshot: fresh, appIsActive: active)
-                await liveActivity.update(snapshot: fresh, position: clockPosition)
+                await liveActivity.restart(snapshot: hydrated, appIsActive: active)
+                await liveActivity.update(snapshot: hydrated, position: clockPosition)
             }
 
-            fetchLyrics(title: title, artist: artist, duration: duration, trackID: trackID, generation: generation)
             return
         }
 
@@ -327,7 +336,7 @@ final class LyricsDriveBridge {
                 anchorDate: clockAnchorDate,
                 isPlaying: isPlaying,
                 lines: current.lines,
-                status: current.lines.isEmpty ? current.status : "Paroles synchronisées"
+                status: current.status
             )
             snapshot = current
             lastTransportState = isPlaying
@@ -355,57 +364,134 @@ final class LyricsDriveBridge {
         Task { await liveActivity.stop() }
     }
 
-    private func fetchLyrics(
-        title: String,
-        artist: String,
-        duration: TimeInterval,
-        trackID: String,
-        generation: UUID
-    ) {
-        var components = URLComponents(string: "https://lrclib.net/api/get")!
-        var query = [
-            URLQueryItem(name: "track_name", value: title),
-            URLQueryItem(name: "artist_name", value: artist)
-        ]
-        if duration > 0 {
-            query.append(URLQueryItem(name: "duration", value: String(Int(duration.rounded()))))
-        }
-        components.queryItems = query
-        guard let url = components.url else { return }
-
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 12
-        request.setValue("LyricsDrive-EeveeBridge/0.3", forHTTPHeaderField: "User-Agent")
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            self.stateQueue.async {
-                guard generation == self.lyricsGeneration, trackID == self.lastRawTrackID else { return }
-
-                if let data,
-                   let http = response as? HTTPURLResponse,
-                   (200..<300).contains(http.statusCode),
-                   let decoded = try? JSONDecoder().decode(LRCLIBResponse.self, from: data),
-                   let raw = decoded.syncedLyrics,
-                   !raw.isEmpty {
-                    let lines = Self.parseLRC(raw)
-                    if !lines.isEmpty {
-                        self.applyLyrics(lines, status: "Paroles synchronisées", generation: generation)
-                        return
-                    }
-                }
-
-                let status = error == nil ? "Paroles synchronisées introuvables" : "LRCLIB indisponible"
-                self.applyLyrics([], status: status, generation: generation)
+    private func installEeveeLyricsObserver() {
+        eeveeLyricsObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name("LyricsDrive.EeveeLyricsLoaded"),
+            object: nil,
+            queue: nil
+        ) { [weak self] note in
+            self?.stateQueue.async {
+                self?.consumeEeveeLyrics(note)
             }
-        }.resume()
+        }
     }
 
-    private func applyLyrics(_ lines: [BridgeLyricLine], status: String, generation: UUID) {
-        guard generation == lyricsGeneration, let current = snapshot else { return }
+    private func consumeEeveeLyrics(_ note: Notification) {
+        guard
+            let info = note.userInfo,
+            let trackID = info["trackId"] as? String,
+            let title = info["title"] as? String,
+            let artist = info["artist"] as? String,
+            let source = info["source"] as? String,
+            let timeSynced = info["timeSynced"] as? Bool
+        else { return }
 
+        let rawLines = info["lines"] as? [[String: Any]] ?? []
+        let lines = rawLines.compactMap { row -> BridgeLyricLine? in
+            guard
+                let content = row["content"] as? String,
+                !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return nil }
+
+            let offsetMs: Double
+            if let n = row["offsetMs"] as? NSNumber {
+                offsetMs = n.doubleValue
+            } else if let i = row["offsetMs"] as? Int {
+                offsetMs = Double(i)
+            } else if let d = row["offsetMs"] as? Double {
+                offsetMs = d
+            } else {
+                return nil
+            }
+
+            guard offsetMs >= 0 else { return nil }
+            return BridgeLyricLine(time: offsetMs / 1000.0, text: content)
+        }.sorted { $0.time < $1.time }
+
+        let payload = EeveeLyricsPayload(
+            trackID: trackID,
+            title: title,
+            artist: artist,
+            source: source,
+            timeSynced: timeSynced,
+            lines: lines
+        )
+        pendingEeveeLyrics = payload
+
+        guard let current = snapshot, matches(payload: payload, snapshot: current) else { return }
+
+        let updated = snapshotByApplying(payload: payload, to: current)
+        snapshot = updated
+        reloadWidget()
+
+        clockPosition = updated.progressAtAnchor
+        clockAnchorDate = updated.anchorDate
+
+        Task {
+            let active = await MainActor.run { UIApplication.shared.applicationState == .active }
+            await liveActivity.ensureStarted(snapshot: updated, appIsActive: active)
+            await liveActivity.update(snapshot: updated, position: updated.progressAtAnchor)
+        }
+    }
+
+    private func matches(payload: EeveeLyricsPayload, snapshot: BridgeSnapshot) -> Bool {
+        let currentID = normalizedSpotifyTrackID(snapshot.trackID)
+        let incomingID = normalizedSpotifyTrackID(payload.trackID)
+
+        if !incomingID.isEmpty, !currentID.isEmpty, incomingID == currentID {
+            return true
+        }
+
+        let sameTitle = payload.title.compare(
+            snapshot.title,
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ) == .orderedSame
+        let sameArtist = payload.artist.compare(
+            snapshot.artist,
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ) == .orderedSame
+
+        return sameTitle && sameArtist
+    }
+
+    private func normalizedSpotifyTrackID(_ raw: String) -> String {
+        if raw.hasPrefix("spotify:track:") {
+            return String(raw.dropFirst("spotify:track:".count))
+        }
+
+        if let range = raw.range(of: "/track/") {
+            let tail = raw[range.upperBound...]
+            return String(tail.split(separator: "?").first ?? Substring(tail))
+        }
+
+        if !raw.contains("|"), !raw.contains(" "), raw.count >= 16 {
+            return raw
+        }
+
+        return ""
+    }
+
+    private func snapshotByApplying(
+        payload: EeveeLyricsPayload,
+        to current: BridgeSnapshot
+    ) -> BridgeSnapshot {
         let now = Date()
-        let stablePosition = clockPosition + (clockIsPlaying ? max(0, now.timeIntervalSince(clockAnchorDate)) : 0)
-        let updated = BridgeSnapshot(
+        let stablePosition = min(
+            current.duration > 0 ? current.duration : .greatestFiniteMagnitude,
+            max(0, clockPosition + (clockIsPlaying ? max(0, now.timeIntervalSince(clockAnchorDate)) : 0))
+        )
+
+        let usableLines = payload.timeSynced ? payload.lines : []
+        let status: String
+        if !payload.timeSynced {
+            status = "\(payload.source) — paroles non synchronisées"
+        } else if usableLines.isEmpty {
+            status = "\(payload.source) — aucune ligne synchronisée"
+        } else {
+            status = "\(payload.source) • EeveeSpotify"
+        }
+
+        return BridgeSnapshot(
             trackID: current.trackID,
             title: current.title,
             artist: current.artist,
@@ -414,20 +500,9 @@ final class LyricsDriveBridge {
             progressAtAnchor: stablePosition,
             anchorDate: now,
             isPlaying: clockIsPlaying,
-            lines: lines,
+            lines: usableLines,
             status: status
         )
-        snapshot = updated
-        reloadWidget()
-
-        clockPosition = stablePosition
-        clockAnchorDate = now
-
-        Task {
-            let active = await MainActor.run { UIApplication.shared.applicationState == .active }
-            await liveActivity.ensureStarted(snapshot: updated, appIsActive: active)
-            await liveActivity.update(snapshot: updated, position: stablePosition)
-        }
     }
 
     private func reloadWidget() {
@@ -480,37 +555,6 @@ final class LyricsDriveBridge {
         return nil
     }
 
-    private static func parseLRC(_ raw: String) -> [BridgeLyricLine] {
-        let pattern = #"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]\s*(.*)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-
-        return raw.split(separator: "\n", omittingEmptySubsequences: false).compactMap { sub in
-            let line = String(sub)
-            let range = NSRange(line.startIndex..<line.endIndex, in: line)
-            guard let match = regex.firstMatch(in: line, range: range),
-                  match.numberOfRanges >= 5,
-                  let minRange = Range(match.range(at: 1), in: line),
-                  let secRange = Range(match.range(at: 2), in: line),
-                  let textRange = Range(match.range(at: 4), in: line),
-                  let minutes = Double(line[minRange]),
-                  let seconds = Double(line[secRange]) else {
-                return nil
-            }
-
-            var fraction = 0.0
-            if match.range(at: 3).location != NSNotFound,
-               let fracRange = Range(match.range(at: 3), in: line) {
-                let digits = String(line[fracRange])
-                if let value = Double(digits) {
-                    fraction = value / pow(10.0, Double(digits.count))
-                }
-            }
-
-            let text = String(line[textRange]).trimmingCharacters(in: .whitespaces)
-            guard !text.isEmpty else { return nil }
-            return BridgeLyricLine(time: minutes * 60 + seconds + fraction, text: text)
-        }.sorted { $0.time < $1.time }
-    }
 }
 
 private extension JSONEncoder {
