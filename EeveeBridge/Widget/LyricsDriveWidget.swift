@@ -329,7 +329,7 @@ struct LyricsDriveCarPlayWidget: Widget {
             LyricsView(entry: entry)
         }
         .configurationDisplayName("LyricsDrive")
-        .description("Paroles synchronisées du morceau Spotify en cours.")
+        .description("Paroles synchronisées pour iPhone, CarPlay et le Dashboard.")
         .supportedFamilies([.systemSmall])
         .containerBackgroundRemovable(true)
         .contentMarginsDisabled()
@@ -350,47 +350,80 @@ private struct LyricsActivityView: View {
     }
 
     private var carPlayLayout: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "waveform")
-                    .font(.caption.weight(.bold))
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(.red)
+                        .frame(width: 22, height: 22)
 
-                Text(context.state.title)
-                    .font(.caption.weight(.semibold))
+                    Image(systemName: "music.note")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+
+                Text("LyricsDrive")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .lineLimit(1)
 
-                Spacer(minLength: 4)
+                Spacer(minLength: 6)
 
-                Image(systemName: context.state.isPlaying ? "play.fill" : "pause.fill")
-                    .font(.caption2.weight(.bold))
+                Text(context.state.title)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: 110, alignment: .trailing)
             }
 
             Spacer(minLength: 0)
 
             Text(context.state.currentLine)
-                .font(.system(size: 19, weight: .bold, design: .rounded))
-                .lineLimit(3)
-                .minimumScaleFactor(0.72)
+                .font(.system(size: 21, weight: .bold, design: .rounded))
+                .lineLimit(2)
+                .minimumScaleFactor(0.68)
+                .multilineTextAlignment(.leading)
 
             if !context.state.nextLine.isEmpty {
                 Text(context.state.nextLine)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             } else {
                 Text(context.state.artist)
-                    .font(.caption2.weight(.medium))
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
 
-            ProgressView(value: context.state.progress)
-                .progressViewStyle(.linear)
-                .tint(.white)
+            HStack(alignment: .center, spacing: 3) {
+                ForEach(0..<18, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(index == 8 || index == 9 ? Color.red : Color.secondary.opacity(0.42))
+                        .frame(
+                            width: 3,
+                            height: dashboardBarHeight(index: index, progress: context.state.progress)
+                        )
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: context.state.isPlaying ? "waveform" : "pause.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(height: 18)
         }
-        .padding(11)
-        .activityBackgroundTint(.black.opacity(0.94))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .activityBackgroundTint(.black.opacity(0.92))
         .activitySystemActionForegroundColor(.white)
+    }
+
+    private func dashboardBarHeight(index: Int, progress: Double) -> CGFloat {
+        let phase = Int(progress * 1000) + index * 3
+        let pattern: [CGFloat] = [4, 7, 11, 15, 9, 13, 6, 10]
+        return pattern[abs(phase) % pattern.count]
     }
 
     private var standardLayout: some View {
