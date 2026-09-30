@@ -32,3 +32,8 @@ Le rapport reçu sur la v0.4 montrait une position brute à 7,53 s, inchangée d
 La nouvelle horloge utilise le temps monotone écoulé depuis son ancre. Une valeur brute identique ne déclenche plus de recalage, même après plusieurs relevés. Une nouvelle valeur, y compris zéro, est appliquée une seule fois. Une pause/reprise avec une valeur inchangée conserve la position locale.
 
 Tests Swift : répétition exacte du rapport, retours/avances, retour à zéro, pause/reprise avec ancre figée, valeurs manquantes/invalides, durée inconnue/fin de morceau, nouveau morceau. Après installation, démarrer une chanson depuis le début pour disposer d'une ancre fraîche. Le diagnostic v0.5 et le test local restent disponibles.
+
+
+## v0.6 CarPlay
+
+Base v0.5 conservée, avec avance visuelle de 450 ms et présentation CarPlay dédiée pour le widget et la Live Activity.
