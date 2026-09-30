@@ -10,22 +10,67 @@ on:
 permissions:
   contents: read
 
+env:
+  SWIFTPROTOBUF_VERSION: "1.29.0"
+
 jobs:
   build:
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      THEOS: ${{ github.workspace }}/theos
+      THEOS_PACKAGE_SCHEME: rootless
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout LyricsDrive
+        uses: actions/checkout@v4
+
+      - name: Checkout EeveeSpotifyReincarnated
+        uses: actions/checkout@v4
+        with:
+          repository: SideloadLabs/EeveeSpotifyReincarnated
+          ref: Master
+          path: upstream-eevee
+          submodules: recursive
+
+      - name: Checkout Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          path: theos
+          submodules: recursive
 
       - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install build tools
+        run: |
+          brew install xcodegen make dpkg ldid
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
-      - name: Build bridge dylib
+      - name: Patch Eevee lyrics pipeline
+        run: |
+          python3 EeveeBridge/EeveePatch/apply_patch.py
+          grep -n "publishLyricsToLyricsDrive" upstream-eevee/Sources/EeveeSpotify/Lyrics/CustomLyrics.x.swift
+
+      - name: Build patched EeveeSpotify tweak
+        working-directory: upstream-eevee
+        env:
+          REPO_SLUG: SideloadLabs/EeveeSpotifyReincarnated
+          BRANCH_NAME: Master
+        run: |
+          set -euxo pipefail
+          make build-eeveeswiftprotobuf
+          make clean || true
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          DEB="$(ls -t packages/*.deb | head -n 1)"
+          test -n "$DEB"
+          mkdir -p ../EeveeBridge/build/eevee-deb
+          dpkg-deb -x "$DEB" ../EeveeBridge/build/eevee-deb
+          find ../EeveeBridge/build/eevee-deb -maxdepth 6 -type f | sort
+
+      - name: Build LyricsDrive bridge dylib
         working-directory: EeveeBridge
         run: |
           set -euxo pipefail
@@ -34,8 +79,7 @@ jobs:
 
           xcrun --sdk iphoneos clang             -target arm64-apple-ios26.0             -isysroot "$SDK"             -fobjc-arc             -c Bridge/Bootstrap.m             -o build/bridge/Bootstrap.o
 
-          xcrun --sdk iphoneos swiftc             -target arm64-apple-ios26.0             -sdk "$SDK"             -parse-as-library             -emit-library             Bridge/LyricsDriveBridge.swift             build/bridge/Bootstrap.o             -o build/bridge/zxPluginsInject.dylib             -Xlinker -install_name             -Xlinker @rpath/zxPluginsInject.dylib             -framework Foundation             -framework MediaPlayer             -framework WidgetKit             -framework Network             -framework ActivityKit \
-            -framework UIKit
+          xcrun --sdk iphoneos swiftc             -target arm64-apple-ios26.0             -sdk "$SDK"             -parse-as-library             -emit-library             Bridge/LyricsDriveBridge.swift             build/bridge/Bootstrap.o             -o build/bridge/zxPluginsInject.dylib             -Xlinker -install_name             -Xlinker @rpath/zxPluginsInject.dylib             -framework Foundation             -framework MediaPlayer             -framework WidgetKit             -framework Network             -framework ActivityKit             -framework UIKit
 
           file build/bridge/zxPluginsInject.dylib
 
@@ -49,33 +93,56 @@ jobs:
           set -o pipefail
           xcodebuild             -project EeveeLyricsBridge.xcodeproj             -scheme EeveeLyricsWidget             -configuration Release             -sdk iphoneos             -derivedDataPath build/widget             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             CODE_SIGN_IDENTITY=""             clean build | tee xcodebuild.log
 
-      - name: Collect patch payload
+      - name: Collect integrated payload
         working-directory: EeveeBridge
         run: |
           set -eux
           rm -rf artifact
           mkdir -p artifact
+
           cp build/bridge/zxPluginsInject.dylib artifact/zxPluginsInject.dylib
+
+          EEVEE_DYLIB="$(find build/eevee-deb -type f -name 'EeveeSpotify.dylib' -print -quit)"
+          test -n "$EEVEE_DYLIB"
+          cp "$EEVEE_DYLIB" artifact/EeveeSpotify.dylib
+
+          EEVEE_BUNDLE="$(find build/eevee-deb -type d -name 'EeveeSpotify.bundle' -print -quit)"
+          if [ -n "$EEVEE_BUNDLE" ]; then
+            cp -R "$EEVEE_BUNDLE" artifact/EeveeSpotify.bundle
+          fi
+
+          EEVEE_PROTO="$(find build/eevee-deb -type d -name 'EeveeSwiftProtobuf.framework' -print -quit)"
+          if [ -n "$EEVEE_PROTO" ]; then
+            cp -R "$EEVEE_PROTO" artifact/EeveeSwiftProtobuf.framework
+          fi
+
+          KARAOKE_LIB="$(find build/eevee-deb -type f -name 'KaraokeBackgroundShader.metallib' -print -quit)"
+          if [ -n "$KARAOKE_LIB" ]; then
+            cp "$KARAOKE_LIB" artifact/KaraokeBackgroundShader.metallib
+          fi
 
           WIDGET="$(find build/widget/Build/Products/Release-iphoneos -maxdepth 1 -type d -name 'WidgetExtension.appex' -print -quit)"
           test -n "$WIDGET"
           cp -R "$WIDGET" artifact/WidgetExtension.appex
 
-          file artifact/zxPluginsInject.dylib
+          strings artifact/EeveeSpotify.dylib | grep -F "LyricsDriveBridgePublishLyricsJSON"
+          file artifact/zxPluginsInject.dylib artifact/EeveeSpotify.dylib
           plutil -p artifact/WidgetExtension.appex/Info.plist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: EeveeLyricsBridge-patch
+          name: EeveeLyricsBridge-integrated-patch
           path: EeveeBridge/artifact
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload log on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: EeveeLyricsBridge-xcodebuild-log
-          path: EeveeBridge/xcodebuild.log
+          name: EeveeLyricsBridge-build-logs
+          path: |
+            EeveeBridge/xcodebuild.log
+            upstream-eevee/packages
           if-no-files-found: ignore
           retention-days: 7
