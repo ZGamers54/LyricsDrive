@@ -54,3 +54,16 @@ Base exacte : commit v0.9 `3f2f580ba4fa3350c39cab76565daf48aacbfef3`. Le rendu v
 Le workflow `build-v06-carplay.yml` compile le correctif v0.10 et vérifie le cache, les réponses 503 successives, Retry-After, les déplacements, la limite ActivityKit, l’horloge existante et le protocole. Les anciens workflows de prototypes intégrés restent lançables manuellement ; ils dépendent de sources absentes de cette branche.
 
 [Installation locale et essai verrouillé](INSTALL-v0.10.md). Le patch ne contient pas Spotify. Les premières écoutes sans cache dépendent encore de LRCLIB ; iOS reste maître du rendu verrouillé et CarPlay.
+
+## v0.11 — horloge, échéances et décalage
+
+Le suivi conserve la dernière vitesse connue si la clé disparaît. Les changements de phrase sont
+planifiés par un minuteur ponctuel, avec recherche binaire et recalcul après pause/seek/vitesse.
+Le polling Now Playing revient à 500 ms et les publications sont dédupliquées avant de créer une Task.
+Le décalage persistant est réglable dans le diagnostic (0 ms par défaut, ±2000 ms).
+Les notifications publiques de cycle de vie, scène et audio déclenchent une resynchronisation.
+Le rapport conserve l’échantillon d’arrière-plan, ses clés, les échéances et les durées d’envoi.
+
+[Code et limites de l’étape 2](SYNC-v0.11.md) · [Installation et essai sans voiture](INSTALL-v0.11.md).
+Le gel verrouillé n’est pas déclaré résolu sans essai sur l’iPhone. Le rendu CarPlay conserve
+la présentation existante ; la photo de référence a été retrouvée pour l’étape de présentation.

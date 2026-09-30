@@ -21,7 +21,7 @@ class PackagingTests(unittest.TestCase):
             (patch / "SOURCE_COMMIT.txt").write_text("tested commit\n")
             (widget / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": "WidgetExtension"}))
             (widget / "WidgetExtension").write_bytes(b"new widget")
-            source, output = root / "v09.ipa", root / "v010.ipa"
+            source, output = root / "v09.ipa", root / "v011.ipa"
             app = "Payload/Spotify.app/"
             host = {"CFBundleExecutable": "Spotify", "CFBundleIdentifier": "com.spotify.client",
                     "CFBundleVersion": "9098", "CFBundleShortVersionString": "9.0.98", "UIBackgroundModes": ["audio"]}
@@ -47,7 +47,7 @@ class PackagingTests(unittest.TestCase):
                 self.assertNotIn(app + "_CodeSignature/CodeResources", bundle.namelist())
                 host_info = plistlib.loads(bundle.read(app + "Info.plist"))
                 widget_info = plistlib.loads(bundle.read(app + "PlugIns/WidgetExtension.appex/Info.plist"))
-                self.assertEqual(host_info["LyricsDriveVersion"], "0.10")
+                self.assertEqual(host_info["LyricsDriveVersion"], "0.11")
                 self.assertTrue(host_info["NSSupportsLiveActivities"])
                 self.assertEqual(widget_info["CFBundleVersion"], host_info["CFBundleVersion"])
                 self.assertEqual(widget_info["CFBundleIdentifier"], "com.spotify.client.widgetnowplaying")

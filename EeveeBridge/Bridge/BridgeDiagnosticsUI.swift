@@ -56,6 +56,8 @@ final class BridgeDiagnosticsUI {
 private final class DiagnosticsViewController: UIViewController {
     private let report = UITextView()
     private var timer: Timer?
+    private let offsetLabel = UILabel()
+    private let offsetSlider = UISlider()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -79,7 +81,19 @@ private final class DiagnosticsViewController: UIViewController {
             button.heightAnchor.constraint(greaterThanOrEqualToConstant: 38).isActive = true
             actions.addArrangedSubview(button)
         }
-        let stack = UIStackView(arrangedSubviews: [actions, report])
+        offsetSlider.minimumValue = -2_000
+        offsetSlider.maximumValue = 2_000
+        offsetSlider.value = Float(UserDefaults.standard.integer(forKey: "LyricsDrive.SyncOffsetMilliseconds"))
+        offsetSlider.isContinuous = false
+        offsetSlider.accessibilityLabel = "Décalage des paroles en millisecondes"
+        offsetSlider.addTarget(self, action: #selector(changeOffset), for: .valueChanged)
+        offsetLabel.font = .systemFont(ofSize: 12)
+        offsetLabel.numberOfLines = 2
+        updateOffsetLabel()
+        let controls = UIStackView(arrangedSubviews: [offsetLabel, offsetSlider])
+        controls.axis = .vertical
+        controls.spacing = 4
+        let stack = UIStackView(arrangedSubviews: [actions, controls, report])
         stack.axis = .vertical
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -113,6 +127,18 @@ private final class DiagnosticsViewController: UIViewController {
             self.report.text = text
             self.report.setContentOffset(offset, animated: false)
         }
+    }
+
+    private func updateOffsetLabel() {
+        offsetLabel.text = String(format: "Décalage : %+.0f ms · + avance, − retarde\n0 ms = horodatages des paroles sans compensation", offsetSlider.value)
+    }
+
+    @objc private func changeOffset() {
+        let milliseconds = Int((offsetSlider.value / 100).rounded()) * 100
+        offsetSlider.value = Float(milliseconds)
+        updateOffsetLabel()
+        LyricsDriveBridge.shared.setSynchronizationOffset(milliseconds: milliseconds)
+        refresh()
     }
 
     @objc private func startTest() { LyricsDriveBridge.shared.setDemo(true); refresh() }

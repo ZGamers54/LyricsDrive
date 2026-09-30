@@ -1,4 +1,4 @@
-name: Build LyricsDrive v0.10 CarPlay
+name: Build LyricsDrive v0.11 CarPlay
 
 on:
   pull_request:
@@ -43,6 +43,12 @@ jobs:
           swiftc Shared/LyricsLiveState.swift Tests/LyricsLiveStateTests.swift -o /tmp/lyrics-live-state-tests
           /tmp/lyrics-live-state-tests
 
+      - name: Test lyric boundary scheduling
+        working-directory: EeveeBridge
+        run: |
+          swiftc Bridge/PlaybackClock.swift Shared/LyricsSchedule.swift Tests/LyricsScheduleTests.swift -o /tmp/lyrics-schedule-tests
+          /tmp/lyrics-schedule-tests
+
       - name: Build bridge dylib
         working-directory: EeveeBridge
         run: |
@@ -62,12 +68,13 @@ jobs:
             -sdk "$SDK" \
             -parse-as-library \
             -emit-library \
-            Bridge/*.swift Shared/LyricsLiveState.swift \
+            Bridge/*.swift Shared/LyricsLiveState.swift Shared/LyricsSchedule.swift \
             build/bridge/Bootstrap.o \
             -o build/bridge/zxPluginsInject.dylib \
             -Xlinker -install_name \
             -Xlinker @rpath/zxPluginsInject.dylib \
             -framework Foundation \
+            -framework AVFAudio \
             -framework MediaPlayer \
             -framework WidgetKit \
             -framework Network \
@@ -115,7 +122,7 @@ jobs:
           mkdir -p artifact
           cp build/bridge/zxPluginsInject.dylib artifact/zxPluginsInject.dylib
           cp package_patch.py artifact/package_patch.py
-          cp INSTALL-v0.10.md artifact/INSTALL-v0.10.md
+          cp INSTALL-v0.11.md artifact/INSTALL-v0.11.md
 
           WIDGET="$(find build/widget/Build/Products/Release-iphoneos -maxdepth 1 -type d -name 'WidgetExtension.appex' -print -quit)"
           test -n "$WIDGET"
@@ -127,7 +134,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LyricsDrive-v0.10-CarPlay-patch
+          name: LyricsDrive-v0.11-CarPlay-patch
           path: EeveeBridge/artifact
           if-no-files-found: error
           retention-days: 14
@@ -136,7 +143,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: LyricsDrive-v0.10-CarPlay-build-log
+          name: LyricsDrive-v0.11-CarPlay-build-log
           path: EeveeBridge/xcodebuild.log
           if-no-files-found: ignore
           retention-days: 7

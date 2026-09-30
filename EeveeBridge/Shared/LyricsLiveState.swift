@@ -12,9 +12,12 @@ struct LyricsLiveState: Codable, Hashable {
     let anchorDate: Date
     let positionAtAnchor: Double
     let duration: Double
+    var playbackRate: Double? = nil
+
+    var effectiveRate: Double { isPlaying ? max(0, playbackRate ?? 1) : 0 }
 
     func position(at date: Date) -> Double {
-        let elapsed = isPlaying ? max(0, date.timeIntervalSince(anchorDate)) : 0
+        let elapsed = max(0, date.timeIntervalSince(anchorDate)) * effectiveRate
         let value = max(0, positionAtAnchor + elapsed)
         return duration > 0 ? min(duration, value) : value
     }
@@ -24,7 +27,7 @@ struct LyricsLiveState: Codable, Hashable {
         guard let previous else { return true }
         if trackID != previous.trackID || title != previous.title || artist != previous.artist
             || currentLine != previous.currentLine || nextLine != previous.nextLine
-            || isPlaying != previous.isPlaying || duration != previous.duration {
+            || isPlaying != previous.isPlaying || effectiveRate != previous.effectiveRate || duration != previous.duration {
             return true
         }
         return abs(position(at: date) - previous.position(at: date)) > 0.35

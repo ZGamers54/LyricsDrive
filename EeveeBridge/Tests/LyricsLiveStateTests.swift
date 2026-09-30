@@ -27,6 +27,18 @@ struct LyricsLiveStateTests {
               "A new lyric wasn't published")
         check(state(position: 100, at: later, track: "spotify:track:two").needsPublication(comparedTo: first, at: later),
               "A background track change must update the same activity")
+        var faster = state(position: 100, at: later)
+        faster.playbackRate = 1.5
+        check(faster.needsPublication(comparedTo: first, at: later), "Rate change wasn't published")
+        check(abs(faster.position(at: later.addingTimeInterval(10)) - 115) < 0.0001, "1.5x progress is wrong")
+        var sameRate = state(position: 115, at: later.addingTimeInterval(10))
+        sameRate.playbackRate = 1.5
+        check(!sameRate.needsPublication(comparedTo: faster, at: later.addingTimeInterval(10)),
+              "1.5x playback shouldn't flood updates")
+        let legacyData = try JSONEncoder().encode(first)
+        let legacy = try JSONDecoder().decode(LyricsLiveState.self, from: legacyData)
+        check(legacy.effectiveRate == 1, "Legacy state must default to 1x")
+        print("PASS: rate changes, 1.5x progression, legacy optional rate")
         print("PASS: 90 seconds of monotone playback, same-line forward/backward seek, pause, next track")
 
         let paused = state(position: 30, at: start, playing: false)

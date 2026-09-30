@@ -51,7 +51,7 @@ def patch_ipa(source, output, patch_directory):
                 modes.append("audio")
             info["UIBackgroundModes"] = modes
             info["MinimumOSVersion"] = "26.0"
-            info["LyricsDriveVersion"] = "0.10"
+            info["LyricsDriveVersion"] = "0.11"
             patched_widget_info = plistlib.loads((widget / "Info.plist").read_bytes())
             for key in ("CFBundleShortVersionString", "CFBundleVersion"):
                 if key in info:

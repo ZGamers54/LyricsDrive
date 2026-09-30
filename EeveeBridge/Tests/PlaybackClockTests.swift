@@ -38,6 +38,30 @@ struct PlaybackClockTests {
         close(clock.position(at: 1050, duration: 180), 0)
         precondition(clock.consume(elapsed: 42, isPlaying: false, now: 1050, duration: 180))
         close(clock.position(at: 1100, duration: 180), 42)
+        // Missing rate after locking is not an implicit pause; explicit zero still pauses.
+        clock.reset(elapsed: 0.04, rate: 1, now: 2000)
+        for second in 1...75 {
+            precondition(!clock.consume(elapsed: 0.04, rate: nil, now: 2000 + Double(second), duration: 240))
+        }
+        close(clock.position(at: 2075.2, duration: 240), 75.24)
+        precondition(clock.isPlaying)
+        precondition(clock.consume(elapsed: nil, rate: 0, now: 2076, duration: 240))
+        close(clock.position(at: 2100, duration: 240), 76.04)
+        precondition(!clock.consume(elapsed: nil, rate: nil, now: 2101, duration: 240))
+        close(clock.position(at: 2102, duration: 240), 76.04)
+        // Rate changes preserve position, and frozen anchors extrapolate at the actual rate.
+        precondition(clock.consume(elapsed: nil, rate: 1.5, now: 2102, duration: 240))
+        close(clock.position(at: 2112, duration: 240), 91.04)
+        precondition(!clock.consume(elapsed: .infinity, rate: .nan, now: 2112, duration: 240))
+        close(clock.position(at: 2122, duration: 240), 106.04)
+        precondition(clock.consume(elapsed: 80, rate: 0.5, now: 2122, duration: 240))
+        close(clock.position(at: 2132, duration: 240), 85)
+        close(clock.lastAnchorCorrection!, -26.04)
+        // A long gap catches up from the anchor rather than incrementing once on wake.
+        close(clock.position(at: 2300, duration: 240), 169)
+        clock.reset(elapsed: 0, rate: nil, now: 2300)
+        close(clock.position(at: 2310, duration: 180), 5)
+        print("PASS: missing rate while locked, explicit pause, 0.5x/1.5x, invalid rate, gap, corrections")
         print("PASS: frozen 7.53s regression, seeks, zero, pause/resume, missing samples, duration, new track")
     }
 }

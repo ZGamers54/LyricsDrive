@@ -3,10 +3,6 @@ import Network
 import SwiftUI
 import WidgetKit
 
-private enum LyricsTiming {
-    static let displayLead: TimeInterval = 0.45
-}
-
 struct LyricsActivityAttributes: ActivityAttributes {
     typealias ContentState = LyricsLiveState
     let trackID: String
@@ -28,33 +24,23 @@ private struct BridgeSnapshot: Codable, Hashable {
     let isPlaying: Bool
     let lines: [LyricLine]
     let status: String
+    var playbackRate: Double? = nil
+    var displayOffset: TimeInterval? = nil
+    var effectiveRate: Double { isPlaying ? max(0, playbackRate ?? 1) : 0 }
 
     func position(at date: Date) -> TimeInterval {
-        let delta = isPlaying ? max(0, date.timeIntervalSince(anchorDate)) : 0
+        let delta = max(0, date.timeIntervalSince(anchorDate)) * effectiveRate
         let position = max(0, progressAtAnchor + delta)
         return duration > 0 ? min(duration, position) : position
     }
 
     func lyricPosition(at date: Date) -> TimeInterval {
-        max(0, position(at: date) + LyricsTiming.displayLead)
+        position(at: date) + (displayOffset ?? 0)
     }
 
     func lineIndex(at date: Date) -> Int? {
-        let position = lyricPosition(at: date)
-        var low = 0
-        var high = lines.count - 1
-        var answer: Int?
-
-        while low <= high {
-            let mid = (low + high) / 2
-            if lines[mid].time <= position {
-                answer = mid
-                low = mid + 1
-            } else {
-                high = mid - 1
-            }
-        }
-        return answer
+        LyricsSchedule.currentIndex(in: lines, position: position(at: date),
+                                    offset: displayOffset ?? 0, time: { $0.time })
     }
 }
 
@@ -90,15 +76,16 @@ private struct Provider: TimelineProvider {
 
             var entries = [Entry(date: now, snapshot: snapshot)]
 
-            if snapshot.isPlaying, !snapshot.lines.isEmpty {
+            if snapshot.effectiveRate > 0.001, !snapshot.lines.isEmpty {
                 let currentLyricPosition = snapshot.lyricPosition(at: now)
 
                 for line in snapshot.lines where line.time > currentLyricPosition {
-                    let anticipatedTrackTime = max(0, line.time - LyricsTiming.displayLead)
-                    let delta = anticipatedTrackTime - snapshot.progressAtAnchor
+                    let anticipatedTrackTime = max(0, line.time - (snapshot.displayOffset ?? 0))
+                    guard snapshot.duration <= 0 || anticipatedTrackTime <= snapshot.duration else { continue }
+                    let delta = (anticipatedTrackTime - snapshot.progressAtAnchor) / snapshot.effectiveRate
                     let date = snapshot.anchorDate.addingTimeInterval(delta)
 
-                    if date > now {
+                    if date > now && date > (entries.last?.date ?? now) {
                         entries.append(Entry(date: date, snapshot: snapshot))
                     }
                     if entries.count >= 220 { break }
@@ -108,7 +95,7 @@ private struct Provider: TimelineProvider {
                 // This avoids asking the host app for a fresh timeline ~45 s later,
                 // which is exactly when iOS may have suspended the host after locking.
                 if snapshot.duration > 0 {
-                    let endDelta = snapshot.duration - snapshot.progressAtAnchor
+                    let endDelta = (snapshot.duration - snapshot.progressAtAnchor) / snapshot.effectiveRate
                     let endDate = snapshot.anchorDate.addingTimeInterval(max(0, endDelta))
                     if endDate > (entries.last?.date ?? now).addingTimeInterval(1) {
                         entries.append(Entry(date: endDate, snapshot: snapshot))
@@ -118,7 +105,7 @@ private struct Provider: TimelineProvider {
 
             let policy: TimelineReloadPolicy = snapshot.isPlaying ? .atEnd : .never
             BridgeClient.acknowledge(
-                "Timeline complète : \(entries.count) entrées, \(snapshot.lines.count) lignes, lecture=\(snapshot.isPlaying), policy=\(snapshot.isPlaying ? "atEnd" : "never"), avance=\(LyricsTiming.displayLead)s"
+                "Timeline complète : \(entries.count) entrées, \(snapshot.lines.count) lignes, lecture=\(snapshot.isPlaying), policy=\(snapshot.isPlaying ? "atEnd" : "never"), offset=\(snapshot.displayOffset ?? 0)s, rate=\(snapshot.effectiveRate)"
             )
             completion(Timeline(entries: entries, policy: policy))
         }
@@ -469,9 +456,9 @@ private struct LyricsActivityView: View {
             }
 
             Group {
-                if context.state.isPlaying && context.state.duration > 0 {
-                    let start = context.state.anchorDate.addingTimeInterval(-context.state.positionAtAnchor)
-                    ProgressView(timerInterval: start...start.addingTimeInterval(context.state.duration),
+                if context.state.effectiveRate > 0.001 && context.state.duration > 0 {
+                    let start = context.state.anchorDate.addingTimeInterval(-context.state.positionAtAnchor / context.state.effectiveRate)
+                    ProgressView(timerInterval: start...start.addingTimeInterval(context.state.duration / context.state.effectiveRate),
                                  countsDown: false) {
                         EmptyView()
                     } currentValueLabel: {

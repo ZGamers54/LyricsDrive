@@ -5,10 +5,17 @@ import UIKit
 final class ActivityUpdateLease {
     private var identifier: UIBackgroundTaskIdentifier = .invalid
 
+    private(set) var granted = false
+    private(set) var expired = false
+
     init() {
         identifier = UIApplication.shared.beginBackgroundTask(withName: "LyricsDrive lyric update") { [weak self] in
-            Task { @MainActor in self?.finish() }
+            Task { @MainActor in
+                self?.expired = true
+                self?.finish()
+            }
         }
+        granted = identifier != .invalid
     }
 
     func finish() {

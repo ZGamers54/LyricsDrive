@@ -197,7 +197,7 @@ final class LyricsFetcher {
         guard let url = components.url else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        request.setValue("LyricsDrive/0.10 (+https://github.com/ZGamers54/LyricsDrive)", forHTTPHeaderField: "User-Agent")
+        request.setValue("LyricsDrive/0.11 (+https://github.com/ZGamers54/LyricsDrive)", forHTTPHeaderField: "User-Agent")
         let task = session.dataTask(with: request) { [jitter] data, response, error in
             let http = response as? HTTPURLResponse
             let code = http?.statusCode
