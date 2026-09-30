@@ -2,6 +2,7 @@ import ActivityKit
 import Foundation
 import MediaPlayer
 import Network
+import UIKit
 import WidgetKit
 
 struct LyricsActivityAttributes: ActivityAttributes {
@@ -70,14 +71,14 @@ private struct LRCLIBResponse: Decodable {
 private actor LyricsLiveActivityController {
     private var activity: Activity<LyricsActivityAttributes>?
     private var fingerprint = ""
+    private var lastAttempt = Date.distantPast
 
-    func start(snapshot: BridgeSnapshot) async {
+    func ensureStarted(snapshot: BridgeSnapshot, appIsActive: Bool) async {
+        guard appIsActive else { return }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-
-        if let activity {
-            await activity.end(nil, dismissalPolicy: .immediate)
-            self.activity = nil
-        }
+        if activity != nil { return }
+        guard Date().timeIntervalSince(lastAttempt) >= 2 else { return }
+        lastAttempt = Date()
 
         let pair = snapshot.linePair(at: snapshot.progressAtAnchor)
         let state = LyricsActivityAttributes.ContentState(
@@ -99,6 +100,16 @@ private actor LyricsLiveActivityController {
         } catch {
             activity = nil
         }
+    }
+
+    func restart(snapshot: BridgeSnapshot, appIsActive: Bool) async {
+        if let activity {
+            await activity.end(nil, dismissalPolicy: .immediate)
+            self.activity = nil
+        }
+        fingerprint = ""
+        lastAttempt = .distantPast
+        await ensureStarted(snapshot: snapshot, appIsActive: appIsActive)
     }
 
     func update(snapshot: BridgeSnapshot, position: TimeInterval) async {
@@ -135,6 +146,7 @@ private actor LyricsLiveActivityController {
         }
         activity = nil
         fingerprint = ""
+        lastAttempt = .distantPast
     }
 }
 
@@ -159,6 +171,10 @@ final class LyricsDriveBridge {
     private var lastRawTrackID: String?
     private var lyricsGeneration = UUID()
     private var lastTransportState: Bool?
+    private var clockPosition: TimeInterval = 0
+    private var clockAnchorDate = Date()
+    private var clockIsPlaying = false
+    private var backwardSeekCandidate: (raw: TimeInterval, count: Int)?
     private var started = false
 
     private init() {}
@@ -212,6 +228,10 @@ final class LyricsDriveBridge {
         if trackID != lastRawTrackID {
             lastRawTrackID = trackID
             lastTransportState = isPlaying
+            clockPosition = max(0, elapsed)
+            clockAnchorDate = Date()
+            clockIsPlaying = isPlaying
+            backwardSeekCandidate = nil
 
             let generation = UUID()
             lyricsGeneration = generation
@@ -222,8 +242,8 @@ final class LyricsDriveBridge {
                 artist: artist,
                 album: album,
                 duration: duration,
-                progressAtAnchor: elapsed,
-                anchorDate: Date(),
+                progressAtAnchor: clockPosition,
+                anchorDate: clockAnchorDate,
                 isPlaying: isPlaying,
                 lines: [],
                 status: "Recherche des paroles…"
@@ -232,8 +252,9 @@ final class LyricsDriveBridge {
             reloadWidget()
 
             Task {
-                await liveActivity.start(snapshot: fresh)
-                await liveActivity.update(snapshot: fresh, position: elapsed)
+                let active = await MainActor.run { UIApplication.shared.applicationState == .active }
+                await liveActivity.restart(snapshot: fresh, appIsActive: active)
+                await liveActivity.update(snapshot: fresh, position: clockPosition)
             }
 
             fetchLyrics(title: title, artist: artist, duration: duration, trackID: trackID, generation: generation)
@@ -242,25 +263,68 @@ final class LyricsDriveBridge {
 
         guard var current = snapshot else { return }
 
-        let expected: TimeInterval
-        if current.isPlaying {
-            expected = current.progressAtAnchor + max(0, Date().timeIntervalSince(current.anchorDate))
+        let now = Date()
+        var estimated = clockPosition + (clockIsPlaying ? max(0, now.timeIntervalSince(clockAnchorDate)) : 0)
+        estimated = min(max(estimated, 0), duration > 0 ? duration : estimated)
+
+        let transportChanged = clockIsPlaying != isPlaying
+        var reanchored = false
+
+        if transportChanged {
+            // MPNowPlayingInfoCenter occasionally reports 0/stale elapsed time during transitions.
+            // Prefer the local monotonic clock unless the raw value is clearly plausible.
+            let candidate = (elapsed > 0.5 || estimated < 2.0) && abs(elapsed - estimated) < 8.0
+                ? elapsed
+                : estimated
+            clockPosition = max(0, candidate)
+            clockAnchorDate = now
+            clockIsPlaying = isPlaying
+            backwardSeekCandidate = nil
+            estimated = clockPosition
+            reanchored = true
         } else {
-            expected = current.progressAtAnchor
+            let delta = elapsed - estimated
+
+            if elapsed <= 0.5 && estimated > 3.0 {
+                // Ignore the common transient 0-second sample.
+                backwardSeekCandidate = nil
+            } else if delta > 3.0 {
+                // Forward seeks are safe to accept immediately.
+                clockPosition = elapsed
+                clockAnchorDate = now
+                estimated = elapsed
+                backwardSeekCandidate = nil
+                reanchored = true
+            } else if delta < -3.0 {
+                // A real backward seek produces several coherent low samples; a stale sample usually does not.
+                if let candidate = backwardSeekCandidate,
+                   abs(elapsed - candidate.raw) < 2.0 {
+                    let nextCount = candidate.count + 1
+                    backwardSeekCandidate = (elapsed, nextCount)
+                    if nextCount >= 3 {
+                        clockPosition = elapsed
+                        clockAnchorDate = now
+                        estimated = elapsed
+                        backwardSeekCandidate = nil
+                        reanchored = true
+                    }
+                } else {
+                    backwardSeekCandidate = (elapsed, 1)
+                }
+            } else {
+                backwardSeekCandidate = nil
+            }
         }
 
-        let transportChanged = lastTransportState != isPlaying
-        let drift = abs(expected - elapsed)
-
-        if transportChanged || drift > 2.5 {
+        if reanchored || lastTransportState != isPlaying {
             current = BridgeSnapshot(
                 trackID: current.trackID,
                 title: title,
                 artist: artist,
                 album: album,
                 duration: duration,
-                progressAtAnchor: elapsed,
-                anchorDate: Date(),
+                progressAtAnchor: clockPosition,
+                anchorDate: clockAnchorDate,
                 isPlaying: isPlaying,
                 lines: current.lines,
                 status: current.lines.isEmpty ? current.status : "Paroles synchronisées"
@@ -272,7 +336,9 @@ final class LyricsDriveBridge {
 
         if let latest = snapshot {
             Task {
-                await liveActivity.update(snapshot: latest, position: elapsed)
+                let active = await MainActor.run { UIApplication.shared.applicationState == .active }
+                await liveActivity.ensureStarted(snapshot: latest, appIsActive: active)
+                await liveActivity.update(snapshot: latest, position: estimated)
             }
         }
     }
@@ -281,6 +347,10 @@ final class LyricsDriveBridge {
         guard snapshot != nil else { return }
         snapshot = nil
         lastRawTrackID = nil
+        clockPosition = 0
+        clockAnchorDate = Date()
+        clockIsPlaying = false
+        backwardSeekCandidate = nil
         reloadWidget()
         Task { await liveActivity.stop() }
     }
@@ -305,7 +375,7 @@ final class LyricsDriveBridge {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        request.setValue("LyricsDrive-EeveeBridge/0.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("LyricsDrive-EeveeBridge/0.3", forHTTPHeaderField: "User-Agent")
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             self.stateQueue.async {
@@ -333,23 +403,30 @@ final class LyricsDriveBridge {
     private func applyLyrics(_ lines: [BridgeLyricLine], status: String, generation: UUID) {
         guard generation == lyricsGeneration, let current = snapshot else { return }
 
+        let now = Date()
+        let stablePosition = clockPosition + (clockIsPlaying ? max(0, now.timeIntervalSince(clockAnchorDate)) : 0)
         let updated = BridgeSnapshot(
             trackID: current.trackID,
             title: current.title,
             artist: current.artist,
             album: current.album,
             duration: current.duration,
-            progressAtAnchor: current.progressAtAnchor,
-            anchorDate: current.anchorDate,
-            isPlaying: current.isPlaying,
+            progressAtAnchor: stablePosition,
+            anchorDate: now,
+            isPlaying: clockIsPlaying,
             lines: lines,
             status: status
         )
         snapshot = updated
         reloadWidget()
 
+        clockPosition = stablePosition
+        clockAnchorDate = now
+
         Task {
-            await liveActivity.update(snapshot: updated, position: updated.progressAtAnchor)
+            let active = await MainActor.run { UIApplication.shared.applicationState == .active }
+            await liveActivity.ensureStarted(snapshot: updated, appIsActive: active)
+            await liveActivity.update(snapshot: updated, position: stablePosition)
         }
     }
 
