@@ -3,6 +3,10 @@ import Network
 import SwiftUI
 import WidgetKit
 
+private enum LyricsTiming {
+    static let displayLead: TimeInterval = 0.45
+}
+
 struct LyricsActivityAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
         let title: String
@@ -39,11 +43,16 @@ private struct BridgeSnapshot: Codable, Hashable {
         return duration > 0 ? min(duration, position) : position
     }
 
+    func lyricPosition(at date: Date) -> TimeInterval {
+        max(0, position(at: date) + LyricsTiming.displayLead)
+    }
+
     func lineIndex(at date: Date) -> Int? {
-        let position = position(at: date)
+        let position = lyricPosition(at: date)
         var low = 0
         var high = lines.count - 1
         var answer: Int?
+
         while low <= high {
             let mid = (low + high) / 2
             if lines[mid].time <= position {
@@ -78,17 +87,25 @@ private struct Provider: TimelineProvider {
         BridgeClient.fetch { snapshot, error in
             let now = Date()
             guard let snapshot else {
-                completion(Timeline(entries: [Entry(date: now, snapshot: nil, diagnostic: error)], policy: .after(now.addingTimeInterval(20))))
+                completion(
+                    Timeline(
+                        entries: [Entry(date: now, snapshot: nil, diagnostic: error)],
+                        policy: .after(now.addingTimeInterval(20))
+                    )
+                )
                 return
             }
 
             var entries = [Entry(date: now, snapshot: snapshot)]
 
             if snapshot.isPlaying, !snapshot.lines.isEmpty {
-                let current = snapshot.position(at: now)
-                for line in snapshot.lines where line.time > current {
-                    let delta = line.time - snapshot.progressAtAnchor
+                let currentLyricPosition = snapshot.lyricPosition(at: now)
+
+                for line in snapshot.lines where line.time > currentLyricPosition {
+                    let anticipatedTrackTime = max(0, line.time - LyricsTiming.displayLead)
+                    let delta = anticipatedTrackTime - snapshot.progressAtAnchor
                     let date = snapshot.anchorDate.addingTimeInterval(delta)
+
                     if date > now {
                         entries.append(Entry(date: date, snapshot: snapshot))
                     }
@@ -96,7 +113,9 @@ private struct Provider: TimelineProvider {
                 }
             }
 
-            BridgeClient.acknowledge("Timeline fournie : \(entries.count) entrées, \(snapshot.lines.count) lignes, lecture=\(snapshot.isPlaying)")
+            BridgeClient.acknowledge(
+                "Timeline fournie : \(entries.count) entrées, \(snapshot.lines.count) lignes, lecture=\(snapshot.isPlaying), avance=\(LyricsTiming.displayLead)s"
+            )
             completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(45))))
         }
     }
@@ -106,13 +125,20 @@ private enum BridgeClient {
     static func acknowledge(_ message: String) {
         let queue = DispatchQueue(label: "lyricsdrive.widget.ack")
         let connection = NWConnection(host: "127.0.0.1", port: 38475, using: .tcp)
+
         connection.stateUpdateHandler = { state in
             if case .ready = state {
-                connection.send(content: Data(("ACK " + message + "\n").utf8), completion: .contentProcessed { _ in
-                    connection.receive(minimumIncompleteLength: 1, maximumLength: 32) { _, _, _, _ in connection.cancel() }
-                })
+                connection.send(
+                    content: Data(("ACK " + message + "\n").utf8),
+                    completion: .contentProcessed { _ in
+                        connection.receive(minimumIncompleteLength: 1, maximumLength: 32) { _, _, _, _ in
+                            connection.cancel()
+                        }
+                    }
+                )
             }
         }
+
         connection.start(queue: queue)
         queue.asyncAfter(deadline: .now() + 2) { connection.cancel() }
     }
@@ -133,14 +159,31 @@ private enum BridgeClient {
         func receive() {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, complete, error in
                 guard !finished else { return }
-                if let error { finish(nil, "Réception : " + error.localizedDescription); return }
+                if let error {
+                    finish(nil, "Réception : " + error.localizedDescription)
+                    return
+                }
+
                 do {
-                    guard let payload = try frame.append(data, isComplete: complete) else { receive(); return }
-                    if payload == Data("{}".utf8) { finish(nil, "Bridge connecté · aucun morceau"); return }
+                    guard let payload = try frame.append(data, isComplete: complete) else {
+                        receive()
+                        return
+                    }
+
+                    if payload == Data("{}".utf8) {
+                        finish(nil, "Bridge connecté · aucun morceau")
+                        return
+                    }
+
                     let decoder = JSONDecoder()
                     decoder.dateDecodingStrategy = .millisecondsSince1970
-                    do { finish(try decoder.decode(BridgeSnapshot.self, from: payload)) }
-                    catch { acknowledge("Échec décodage JSON"); finish(nil, "Données du bridge illisibles") }
+
+                    do {
+                        finish(try decoder.decode(BridgeSnapshot.self, from: payload))
+                    } catch {
+                        acknowledge("Échec décodage JSON")
+                        finish(nil, "Données du bridge illisibles")
+                    }
                 } catch {
                     acknowledge("Réponse tronquée ou trop grande")
                     finish(nil, "Réponse incomplète du bridge")
@@ -152,70 +195,128 @@ private enum BridgeClient {
             switch state {
             case .ready:
                 connection.send(content: Data("STATE\n".utf8), completion: .contentProcessed { error in
-                    if error != nil { finish(nil, "Échec envoi au bridge"); return }
+                    if error != nil {
+                        finish(nil, "Échec envoi au bridge")
+                        return
+                    }
                     receive()
                 })
-            case .failed(let error): finish(nil, "Connexion : " + error.localizedDescription)
-            case .cancelled: finish(nil, "Connexion fermée")
-            default: break
+            case .failed(let error):
+                finish(nil, "Connexion : " + error.localizedDescription)
+            case .cancelled:
+                finish(nil, "Connexion fermée")
+            default:
+                break
             }
         }
+
         connection.start(queue: queue)
-        queue.asyncAfter(deadline: .now() + 2) { finish(nil, "Bridge sans réponse (2 s)") }
+        queue.asyncAfter(deadline: .now() + 2) {
+            finish(nil, "Bridge sans réponse (2 s)")
+        }
     }
 }
 
 private struct LyricsView: View {
+    @Environment(\.showsWidgetContainerBackground) private var showsContainerBackground
+
     let entry: Entry
 
     var body: some View {
-        if let snapshot = entry.snapshot {
-            let index = snapshot.lineIndex(at: entry.date)
-            let current = index.map { snapshot.lines[$0].text }
-                ?? snapshot.lines.first?.text
-                ?? snapshot.status
-            let next = index.flatMap { $0 + 1 < snapshot.lines.count ? snapshot.lines[$0 + 1].text : nil }
+        Group {
+            if let snapshot = entry.snapshot {
+                lyrics(snapshot)
+            } else {
+                waiting
+            }
+        }
+        .padding(showsContainerBackground ? 12 : 10)
+        .containerBackground(for: .widget) {
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.94),
+                    Color.indigo.opacity(0.62)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 5) {
-                    Image(systemName: snapshot.isPlaying ? "music.note" : "pause.fill")
-                    Text(snapshot.title)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Text(current)
-                    .font(.headline.weight(.bold))
-                    .lineLimit(3)
-                    .minimumScaleFactor(0.68)
-                if let next, !next.isEmpty {
-                    Text(next)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                } else {
-                    Text(snapshot.artist)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                ProgressView(value: snapshot.duration > 0 ? snapshot.position(at: entry.date) / snapshot.duration : 0)
-                    .progressViewStyle(.linear)
-            }
-            .containerBackground(.fill.tertiary, for: .widget)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("LyricsDrive", systemImage: "music.note")
+    @ViewBuilder
+    private func lyrics(_ snapshot: BridgeSnapshot) -> some View {
+        let index = snapshot.lineIndex(at: entry.date)
+        let current = index.map { snapshot.lines[$0].text }
+            ?? snapshot.lines.first?.text
+            ?? snapshot.status
+        let next = index.flatMap {
+            $0 + 1 < snapshot.lines.count ? snapshot.lines[$0 + 1].text : nil
+        }
+
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: "waveform")
+                    .font(.caption.weight(.bold))
+
+                Text(snapshot.title)
                     .font(.caption.weight(.semibold))
-                Spacer()
-                Text("Lance EeveeSpotify")
-                    .font(.headline)
-                    .lineLimit(2)
-                Text(entry.diagnostic ?? "En attente du bridge")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                Image(systemName: snapshot.isPlaying ? "play.fill" : "pause.fill")
+                    .font(.caption2.weight(.bold))
+                    .accessibilityHidden(true)
             }
-            .containerBackground(.fill.tertiary, for: .widget)
+
+            Spacer(minLength: 0)
+
+            Text(current)
+                .font(.system(size: showsContainerBackground ? 18 : 20, weight: .bold, design: .rounded))
+                .lineLimit(3)
+                .minimumScaleFactor(0.68)
+                .multilineTextAlignment(.leading)
+
+            if let next, !next.isEmpty {
+                Text(next)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text(snapshot.artist)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            ProgressView(
+                value: snapshot.duration > 0
+                    ? snapshot.position(at: entry.date) / snapshot.duration
+                    : 0
+            )
+            .progressViewStyle(.linear)
+            .tint(.primary)
+        }
+    }
+
+    private var waiting: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "waveform")
+                Text("LyricsDrive")
+                    .font(.caption.weight(.semibold))
+            }
+
+            Spacer()
+
+            Text("En attente de Spotify")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .lineLimit(2)
+
+            Text(entry.diagnostic ?? "Bridge prêt")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
         }
     }
 }
@@ -230,35 +331,90 @@ struct LyricsDriveCarPlayWidget: Widget {
         .configurationDisplayName("LyricsDrive")
         .description("Paroles synchronisées du morceau Spotify en cours.")
         .supportedFamilies([.systemSmall])
+        .containerBackgroundRemovable(true)
+        .contentMarginsDisabled()
     }
 }
 
 private struct LyricsActivityView: View {
     @Environment(\.activityFamily) private var activityFamily
+
     let context: ActivityViewContext<LyricsActivityAttributes>
 
     var body: some View {
-        VStack(alignment: .leading, spacing: activityFamily == .small ? 5 : 7) {
-            HStack(spacing: 5) {
-                Image(systemName: context.state.isPlaying ? "music.note" : "pause.fill")
+        if activityFamily == .small {
+            carPlayLayout
+        } else {
+            standardLayout
+        }
+    }
+
+    private var carPlayLayout: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "waveform")
+                    .font(.caption.weight(.bold))
+
+                Text(context.state.title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                Image(systemName: context.state.isPlaying ? "play.fill" : "pause.fill")
+                    .font(.caption2.weight(.bold))
+            }
+
+            Spacer(minLength: 0)
+
+            Text(context.state.currentLine)
+                .font(.system(size: 19, weight: .bold, design: .rounded))
+                .lineLimit(3)
+                .minimumScaleFactor(0.72)
+
+            if !context.state.nextLine.isEmpty {
+                Text(context.state.nextLine)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text(context.state.artist)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            ProgressView(value: context.state.progress)
+                .progressViewStyle(.linear)
+                .tint(.white)
+        }
+        .padding(11)
+        .activityBackgroundTint(.black.opacity(0.94))
+        .activitySystemActionForegroundColor(.white)
+    }
+
+    private var standardLayout: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: "waveform")
                 Text(context.state.title)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
             }
 
             Text(context.state.currentLine)
-                .font(activityFamily == .small ? .headline.weight(.bold) : .title3.weight(.bold))
-                .lineLimit(activityFamily == .small ? 2 : 3)
+                .font(.title3.weight(.bold))
+                .lineLimit(3)
                 .minimumScaleFactor(0.70)
 
             if !context.state.nextLine.isEmpty {
                 Text(context.state.nextLine)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             } else {
                 Text(context.state.artist)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -266,8 +422,8 @@ private struct LyricsActivityView: View {
             ProgressView(value: context.state.progress)
                 .progressViewStyle(.linear)
         }
-        .padding(activityFamily == .small ? 10 : 14)
-        .activityBackgroundTint(.black.opacity(0.88))
+        .padding(14)
+        .activityBackgroundTint(.black.opacity(0.92))
         .activitySystemActionForegroundColor(.white)
     }
 }
@@ -283,6 +439,7 @@ struct LyricsDriveLiveActivity: Widget {
                         Text(context.state.currentLine)
                             .font(.headline)
                             .lineLimit(2)
+
                         if !context.state.nextLine.isEmpty {
                             Text(context.state.nextLine)
                                 .font(.caption2)
@@ -292,12 +449,12 @@ struct LyricsDriveLiveActivity: Widget {
                     }
                 }
             } compactLeading: {
-                Image(systemName: "music.note")
+                Image(systemName: "waveform")
             } compactTrailing: {
                 Text(context.state.currentLine)
-                    .font(.caption2)
+                    .font(.caption2.weight(.semibold))
                     .lineLimit(1)
-                    .frame(maxWidth: 72)
+                    .frame(maxWidth: 86)
             } minimal: {
                 Image(systemName: "music.note")
             }
