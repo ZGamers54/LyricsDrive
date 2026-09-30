@@ -1,4 +1,5 @@
 import ActivityKit
+import Compression
 import Foundation
 import MediaPlayer
 import Network
@@ -17,6 +18,10 @@ struct LyricsActivityAttributes: ActivityAttributes {
         let nextLine: String
         let progress: Double
         let isPlaying: Bool
+        let lyricSchedule: Data
+        let anchorDate: Date
+        let positionAtAnchor: Double
+        let duration: Double
     }
 
     let trackID: String
@@ -25,6 +30,69 @@ struct LyricsActivityAttributes: ActivityAttributes {
 private struct BridgeLyricLine: Codable, Hashable {
     let time: TimeInterval
     let text: String
+}
+
+private enum LiveLyricsScheduleCodec {
+    private static let compressedMagic = Data([0x4C, 0x44, 0x5A, 0x31]) // LDZ1
+    private static let rawMagic = Data([0x4C, 0x44, 0x52, 0x31])        // LDR1
+
+    static func encode(_ lines: [BridgeLyricLine]) -> Data {
+        guard !lines.isEmpty else { return Data() }
+
+        var raw = Data()
+        raw.reserveCapacity(lines.count * 36)
+
+        for line in lines {
+            let millis = UInt32(max(0, min(Double(UInt32.max), (line.time * 1000).rounded())))
+            let bytes = Data(line.text.utf8)
+            let clipped = bytes.prefix(Int(UInt16.max))
+
+            var msLE = millis.littleEndian
+            var lenLE = UInt16(clipped.count).littleEndian
+
+            withUnsafeBytes(of: &msLE) { raw.append(contentsOf: $0) }
+            withUnsafeBytes(of: &lenLE) { raw.append(contentsOf: $0) }
+            raw.append(clipped)
+        }
+
+        guard !raw.isEmpty else { return Data() }
+
+        let capacity = max(256, raw.count + raw.count / 2 + 256)
+        var compressed = Data(count: capacity)
+
+        let compressedCount: Int = raw.withUnsafeBytes { srcBuffer in
+            compressed.withUnsafeMutableBytes { dstBuffer in
+                guard let src = srcBuffer.bindMemory(to: UInt8.self).baseAddress,
+                      let dst = dstBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                    return 0
+                }
+
+                return compression_encode_buffer(
+                    dst,
+                    capacity,
+                    src,
+                    raw.count,
+                    nil,
+                    COMPRESSION_LZFSE
+                )
+            }
+        }
+
+        var output = Data()
+        var rawSize = UInt32(raw.count).littleEndian
+
+        if compressedCount > 0 {
+            output.append(compressedMagic)
+            withUnsafeBytes(of: &rawSize) { output.append(contentsOf: $0) }
+            output.append(compressed.prefix(compressedCount))
+        } else {
+            output.append(rawMagic)
+            withUnsafeBytes(of: &rawSize) { output.append(contentsOf: $0) }
+            output.append(raw)
+        }
+
+        return output
+    }
 }
 
 private struct BridgeSnapshot: Codable, Hashable {
@@ -99,19 +167,24 @@ private actor LyricsLiveActivityController {
         lastAttempt = Date()
 
         let pair = snapshot.linePair(at: snapshot.progressAtAnchor)
+        let schedule = LiveLyricsScheduleCodec.encode(snapshot.lines)
         let state = LyricsActivityAttributes.ContentState(
             title: snapshot.title,
             artist: snapshot.artist,
             currentLine: pair.0,
             nextLine: pair.1,
             progress: snapshot.duration > 0 ? snapshot.progressAtAnchor / snapshot.duration : 0,
-            isPlaying: snapshot.isPlaying
+            isPlaying: snapshot.isPlaying,
+            lyricSchedule: schedule,
+            anchorDate: Date(),
+            positionAtAnchor: snapshot.progressAtAnchor,
+            duration: snapshot.duration
         )
 
         do {
             activity = try Activity.request(
                 attributes: LyricsActivityAttributes(trackID: snapshot.trackID),
-                content: ActivityContent(state: state, staleDate: Date().addingTimeInterval(15)),
+                content: ActivityContent(state: state, staleDate: nil),
                 pushType: nil
             )
             fingerprint = ""
@@ -142,23 +215,28 @@ private actor LyricsLiveActivityController {
         guard nextFingerprint != fingerprint else { return }
         fingerprint = nextFingerprint
 
+        let schedule = LiveLyricsScheduleCodec.encode(snapshot.lines)
         let state = LyricsActivityAttributes.ContentState(
             title: snapshot.title,
             artist: snapshot.artist,
             currentLine: pair.0,
             nextLine: pair.1,
             progress: progress,
-            isPlaying: snapshot.isPlaying
+            isPlaying: snapshot.isPlaying,
+            lyricSchedule: schedule,
+            anchorDate: Date(),
+            positionAtAnchor: position,
+            duration: snapshot.duration
         )
 
         await activity.update(
             ActivityContent(
                 state: state,
-                staleDate: Date().addingTimeInterval(15)
+                staleDate: nil
             )
         )
         lastSubmitted = Date()
-        diagnostic = "Mise à jour transmise à ActivityKit (rendu non confirmé)"
+        diagnostic = "Mise à jour transmise à ActivityKit · planning autonome \(state.lyricSchedule.count) octets"
     }
 
     func stop() async {
@@ -371,7 +449,7 @@ final class LyricsDriveBridge {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        request.setValue("LyricsDrive-EeveeBridge/0.8-lockfix", forHTTPHeaderField: "User-Agent")
+        request.setValue("LyricsDrive-EeveeBridge/0.9-selftimed", forHTTPHeaderField: "User-Agent")
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             self.stateQueue.async {
@@ -541,7 +619,7 @@ final class LyricsDriveBridge {
         guard let start = demoStarted else { return }
         let position = min(30, max(0, Date().timeIntervalSince(start)))
         let demo = BridgeSnapshot(
-            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.8 diagnostic",
+            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.9 diagnostic",
             album: "", duration: 30, progressAtAnchor: 0, anchorDate: start, isPlaying: true,
             lines: [
                 BridgeLyricLine(time: 0, text: "1/6 · Test démarré"),
@@ -571,7 +649,7 @@ final class LyricsDriveBridge {
                 $0.progressAtAnchor + ($0.isPlaying ? max(0, now.timeIntervalSince($0.anchorDate)) : 0)) } ?? 0
             let pair = current?.linePair(at: position)
             let report = """
-            LyricsDrive v0.8 · DIAGNOSTIC
+            LyricsDrive v0.9 · DIAGNOSTIC
             Date : \(ISO8601DateFormatter().string(from: now))
             Mode : \(self.demoStarted == nil ? "Spotify réel" : "TEST LOCAL (Revenir à Spotify pour arrêter)")
 
@@ -594,6 +672,7 @@ final class LyricsDriveBridge {
             Avance affichage : \(String(format: "%.2f s", LyricsTiming.displayLead))
             CarPlay Dashboard : Live Activity ActivityFamily.small
             Timeline verrouillage : complète jusqu’à la fin du morceau
+            Live Activity verrouillée : horloge locale + planning de paroles embarqué
 
             WIDGET
             Serveur : \(self.serverDiagnostic)
