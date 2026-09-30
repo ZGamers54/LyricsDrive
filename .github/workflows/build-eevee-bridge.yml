@@ -31,9 +31,10 @@ jobs:
           set -euxo pipefail
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           mkdir -p build/bridge
-          xcrun --sdk iphoneos clang             -target arm64-apple-ios17.0             -isysroot "$SDK"             -fobjc-arc             -c Bridge/Bootstrap.m             -o build/bridge/Bootstrap.o
 
-          xcrun --sdk iphoneos swiftc             -target arm64-apple-ios17.0             -sdk "$SDK"             -parse-as-library             -emit-library             Bridge/LyricsDriveBridge.swift             build/bridge/Bootstrap.o             -o build/bridge/zxPluginsInject.dylib             -Xlinker -install_name             -Xlinker @rpath/zxPluginsInject.dylib             -framework Foundation             -framework MediaPlayer             -framework WidgetKit             -framework Network
+          xcrun --sdk iphoneos clang             -target arm64-apple-ios26.0             -isysroot "$SDK"             -fobjc-arc             -c Bridge/Bootstrap.m             -o build/bridge/Bootstrap.o
+
+          xcrun --sdk iphoneos swiftc             -target arm64-apple-ios26.0             -sdk "$SDK"             -parse-as-library             -emit-library             Bridge/LyricsDriveBridge.swift             build/bridge/Bootstrap.o             -o build/bridge/zxPluginsInject.dylib             -Xlinker -install_name             -Xlinker @rpath/zxPluginsInject.dylib             -framework Foundation             -framework MediaPlayer             -framework WidgetKit             -framework Network             -framework ActivityKit
 
           file build/bridge/zxPluginsInject.dylib
 
