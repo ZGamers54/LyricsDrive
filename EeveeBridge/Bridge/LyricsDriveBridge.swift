@@ -352,9 +352,12 @@ final class LyricsDriveBridge {
         artist: String,
         duration: TimeInterval,
         trackID: String,
-        generation: UUID
+        generation: UUID,
+        attempt: Int = 0
     ) {
-        lyricsDiagnostic = "Requête LRCLIB en cours"
+        lyricsDiagnostic = attempt == 0
+            ? "Requête LRCLIB en cours"
+            : "Nouvelle tentative LRCLIB \(attempt + 1)/3"
         var components = URLComponents(string: "https://lrclib.net/api/get")!
         var query = [
             URLQueryItem(name: "track_name", value: title),
@@ -368,7 +371,7 @@ final class LyricsDriveBridge {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        request.setValue("LyricsDrive-EeveeBridge/0.7-dashboard", forHTTPHeaderField: "User-Agent")
+        request.setValue("LyricsDrive-EeveeBridge/0.8-lockfix", forHTTPHeaderField: "User-Agent")
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             self.stateQueue.async {
@@ -377,6 +380,25 @@ final class LyricsDriveBridge {
                 let httpCode = (response as? HTTPURLResponse)?.statusCode
                 self.lyricsDiagnostic = error.map { "Réseau : " + $0.localizedDescription }
                     ?? "HTTP \(httpCode.map(String.init) ?? "absent") · \(data?.count ?? 0) octets"
+
+                let transientFailure = error != nil || [502, 503, 504].contains(httpCode ?? -1)
+                if transientFailure, attempt < 2 {
+                    let delay = attempt == 0 ? 1.5 : 3.0
+                    self.lyricsDiagnostic += " · retry dans \(String(format: "%.1f", delay)) s"
+                    self.stateQueue.asyncAfter(deadline: .now() + delay) {
+                        guard generation == self.lyricsGeneration, trackID == self.lastRawTrackID else { return }
+                        self.fetchLyrics(
+                            title: title,
+                            artist: artist,
+                            duration: duration,
+                            trackID: trackID,
+                            generation: generation,
+                            attempt: attempt + 1
+                        )
+                    }
+                    return
+                }
+
                 if let data,
                    let http = response as? HTTPURLResponse,
                    (200..<300).contains(http.statusCode),
@@ -519,7 +541,7 @@ final class LyricsDriveBridge {
         guard let start = demoStarted else { return }
         let position = min(30, max(0, Date().timeIntervalSince(start)))
         let demo = BridgeSnapshot(
-            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.7 diagnostic",
+            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.8 diagnostic",
             album: "", duration: 30, progressAtAnchor: 0, anchorDate: start, isPlaying: true,
             lines: [
                 BridgeLyricLine(time: 0, text: "1/6 · Test démarré"),
@@ -549,7 +571,7 @@ final class LyricsDriveBridge {
                 $0.progressAtAnchor + ($0.isPlaying ? max(0, now.timeIntervalSince($0.anchorDate)) : 0)) } ?? 0
             let pair = current?.linePair(at: position)
             let report = """
-            LyricsDrive v0.7 · DIAGNOSTIC
+            LyricsDrive v0.8 · DIAGNOSTIC
             Date : \(ISO8601DateFormatter().string(from: now))
             Mode : \(self.demoStarted == nil ? "Spotify réel" : "TEST LOCAL (Revenir à Spotify pour arrêter)")
 
@@ -571,6 +593,7 @@ final class LyricsDriveBridge {
             Phrase suivante : \(pair?.1 ?? "aucune")
             Avance affichage : \(String(format: "%.2f s", LyricsTiming.displayLead))
             CarPlay Dashboard : Live Activity ActivityFamily.small
+            Timeline verrouillage : complète jusqu’à la fin du morceau
 
             WIDGET
             Serveur : \(self.serverDiagnostic)
