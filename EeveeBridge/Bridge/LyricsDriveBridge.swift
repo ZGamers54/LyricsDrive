@@ -5,6 +5,10 @@ import Network
 import UIKit
 import WidgetKit
 
+private enum LyricsTiming {
+    static let displayLead: TimeInterval = 0.45
+}
+
 struct LyricsActivityAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
         let title: String
@@ -38,12 +42,13 @@ private struct BridgeSnapshot: Codable, Hashable {
     func linePair(at position: TimeInterval) -> (String, String) {
         guard !lines.isEmpty else { return (status, "") }
 
+        let displayPosition = max(0, position + LyricsTiming.displayLead)
         var low = 0
         var high = lines.count - 1
         var answer: Int?
         while low <= high {
             let mid = (low + high) / 2
-            if lines[mid].time <= position {
+            if lines[mid].time <= displayPosition {
                 answer = mid
                 low = mid + 1
             } else {
@@ -364,7 +369,7 @@ final class LyricsDriveBridge {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        request.setValue("LyricsDrive-EeveeBridge/0.5-diagnostics", forHTTPHeaderField: "User-Agent")
+        request.setValue("LyricsDrive-EeveeBridge/0.6-carplay", forHTTPHeaderField: "User-Agent")
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             self.stateQueue.async {
@@ -515,7 +520,7 @@ final class LyricsDriveBridge {
         guard let start = demoStarted else { return }
         let position = min(30, max(0, Date().timeIntervalSince(start)))
         let demo = BridgeSnapshot(
-            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.5 diagnostic",
+            trackID: "lyricsdrive-diagnostic-test", title: "TEST LOCAL · 30 s", artist: "LyricsDrive v0.6 diagnostic",
             album: "", duration: 30, progressAtAnchor: 0, anchorDate: start, isPlaying: true,
             lines: [
                 BridgeLyricLine(time: 0, text: "1/6 · Test démarré"),
@@ -545,7 +550,7 @@ final class LyricsDriveBridge {
                 $0.progressAtAnchor + ($0.isPlaying ? max(0, now.timeIntervalSince($0.anchorDate)) : 0)) } ?? 0
             let pair = current?.linePair(at: position)
             let report = """
-            LyricsDrive v0.5 · DIAGNOSTIC
+            LyricsDrive v0.6 · DIAGNOSTIC
             Date : \(ISO8601DateFormatter().string(from: now))
             Mode : \(self.demoStarted == nil ? "Spotify réel" : "TEST LOCAL (Revenir à Spotify pour arrêter)")
 
@@ -565,6 +570,7 @@ final class LyricsDriveBridge {
             Lignes : \(current?.lines.count ?? 0)
             Phrase calculée : \(pair?.0 ?? "aucune")
             Phrase suivante : \(pair?.1 ?? "aucune")
+            Avance affichage : \(String(format: "%.2f s", LyricsTiming.displayLead))
 
             WIDGET
             Serveur : \(self.serverDiagnostic)
