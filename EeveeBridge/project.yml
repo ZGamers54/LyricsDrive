@@ -1,0 +1,48 @@
+name: EeveeLyricsBridge
+options:
+  deploymentTarget:
+    iOS: "26.0"
+
+settings:
+  base:
+    SWIFT_VERSION: 5.0
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  LyricsDriveWidgetExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Widget
+    settings:
+      base:
+        PRODUCT_NAME: WidgetExtension
+        PRODUCT_BUNDLE_IDENTIFIER: com.spotify.client.widgetnowplaying
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGNING_ALLOWED: NO
+    info:
+      path: Widget/Info.plist
+      properties:
+        CFBundleDisplayName: LyricsDrive
+        CFBundleExecutable: "$(EXECUTABLE_NAME)"
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundleName: "$(PRODUCT_NAME)"
+        CFBundlePackageType: XPC!
+        CFBundleShortVersionString: "9.0.98"
+        CFBundleVersion: "909801188"
+        MinimumOSVersion: "26.0"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+schemes:
+  EeveeLyricsWidget:
+    build:
+      targets:
+        LyricsDriveWidgetExtension: all
+    archive:
+      config: Release
