@@ -1,0 +1,93 @@
+name: LyricsDrive
+options:
+  bundleIdPrefix: com.zgamers54
+  deploymentTarget:
+    iOS: "26.0"
+
+packages:
+  SpotifyiOS:
+    url: https://github.com/spotify/ios-sdk.git
+    exactVersion: 5.0.1
+
+settings:
+  base:
+    SWIFT_VERSION: 5.0
+    DEVELOPMENT_TEAM: ""
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+
+targets:
+  LyricsDrive:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: LyricsDrive
+      - path: Shared
+    dependencies:
+      - target: LyricsDriveWidgetExtension
+        embed: true
+      - package: SpotifyiOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zgamers54.LyricsDrive
+        PRODUCT_NAME: LyricsDrive
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: LyricsDrive/LyricsDrive.entitlements
+        OTHER_LDFLAGS: "$(inherited) -ObjC"
+    info:
+      path: LyricsDrive/Info.plist
+      properties:
+        CFBundleDisplayName: LyricsDrive
+        CFBundleShortVersionString: "0.4"
+        CFBundleVersion: "4"
+        LSRequiresIPhoneOS: true
+        LSApplicationQueriesSchemes:
+          - spotify
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        CFBundleURLTypes:
+          - CFBundleURLName: com.zgamers54.LyricsDrive
+            CFBundleURLSchemes:
+              - lyricsdrive
+
+  LyricsDriveWidgetExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: LyricsDriveWidget
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zgamers54.LyricsDrive.Widget
+        PRODUCT_NAME: LyricsDriveWidgetExtension
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: LyricsDriveWidget/LyricsDriveWidget.entitlements
+    info:
+      path: LyricsDriveWidget/Info.plist
+      properties:
+        CFBundleDisplayName: LyricsDrive
+        CFBundleShortVersionString: "0.4"
+        CFBundleVersion: "4"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+schemes:
+  LyricsDrive:
+    build:
+      targets:
+        LyricsDrive: all
+        LyricsDriveWidgetExtension: all
+    run:
+      config: Debug
+    archive:
+      config: Release
